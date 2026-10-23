@@ -1,0 +1,22 @@
+[package]
+name = "modeltools"
+version = "0.1.0"
+edition = "2024"
+# 手动声明二进制目标:src/bin/ 下的 .rs 文件是 g3d 的模块(而非独立 bin)
+autobins = false
+
+[dependencies]
+clap = { version = "*", features = ["derive"] }
+
+[[bin]]
+name = "g3d"
+path = "src/bin/g3d.rs"
+
+# 本地 Web 调试器（age3mudels / G3DArmy 管线复刻）
+[[bin]]
+name = "g3d-web"
+path = "src/bin/g3d_web.rs"
+
+# [[bin]]
+# name = "modeltools"
+# path = "src/main.rs"

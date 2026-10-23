@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>age3mudels 调试器 · G3DArmy 管线复刻</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">3D</div>
+      <div class="brand-copy">
+        <div class="brand-title">age3mudels 调试器</div>
+        <div class="brand-sub">G3DArmy 渲染管线复刻</div>
+      </div>
+      <button id="btn-sidebar-collapse" class="drawer-btn" type="button" title="收起模型栏" aria-label="收起模型栏">‹</button>
+    </div>
+    <div class="search-wrap">
+      <input id="model-search" type="search" placeholder="搜索模型（名称 / 组 / 路径）" autocomplete="off">
+    </div>
+    <div class="section-head">
+      <button id="btn-tabs-toggle" class="section-toggle" type="button" aria-expanded="true" title="折叠模型标签">
+        <span class="chevron">▾</span><span>模型标签</span>
+      </button>
+      <span id="tabs-count" class="muted tiny-text"></span>
+    </div>
+    <div id="group-tabs" class="tabs">
+      <button class="tab active" data-group="all">全部</button>
+    </div>
+    <div class="list-head">
+      <span>模型列表</span>
+      <span class="row gap">
+        <span id="model-count" class="muted">0</span>
+        <button id="btn-list-toggle" class="section-toggle icon-only" type="button" aria-expanded="true" title="折叠模型列表">
+          <span class="chevron">▾</span>
+        </button>
+      </span>
+    </div>
+    <div id="model-list" class="model-list"></div>
+    <div class="sidebar-foot">
+      <div id="status-root" class="muted ellipsis">根目录:…</div>
+      <div class="row gap">
+        <button id="btn-prev" class="btn tiny" title="上一个模型（[）">←</button>
+        <button id="btn-next" class="btn tiny" title="下一个模型（]）">→</button>
+        <button id="btn-reload" class="btn tiny" title="重新读取当前 g3dj 与贴图">↻ 重载</button>
+        <span class="muted tiny-text">1–4 切状态 · 空格</span>
+      </div>
+    </div>
+    <div id="sidebar-resizer" class="drawer-resizer vertical" role="separator" aria-orientation="vertical" tabindex="0" title="拖动调整模型栏宽度（双击重置）"></div>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <div class="topbar-left">
+        <div id="hud-model" class="model-title">未选择模型</div>
+        <div id="hud-path" class="muted ellipsis"></div>
+      </div>
+      <div class="hud">
+        <div class="hud-item"><span class="hud-k">动画</span><span id="hud-anim" class="hud-v">—</span></div>
+        <div class="hud-item"><span class="hud-k">帧 / 时间</span><span id="hud-time" class="hud-v mono">—</span></div>
+        <div class="hud-item"><span class="hud-k">FPS</span><span id="hud-fps" class="hud-v mono">—</span></div>
+        <div class="hud-item"><span class="hud-k">绘制</span><span id="hud-draw" class="hud-v mono">—</span></div>
+      </div>
+    </header>
+
+    <div id="stage">
+      <canvas id="view"></canvas>
+      <div id="stage-empty" class="stage-empty">
+        <div class="empty-icon">◈</div>
+        <div>从左侧选择一个模型开始调试</div>
+        <div class="muted small">支持 g3dj（G3DArmy/models/main/g3d 与旧 combos 项目）</div>
+      </div>
+      <div id="stage-loading" class="stage-loading hidden"><span class="spinner"></span><span id="loading-text">加载中…</span></div>
+      <div id="err-overlay" class="err-overlay hidden"><div><div class="err-title">渲染器错误</div><pre id="err-text"></pre></div></div>
+    </div>
+
+    <section id="bottom">
+      <div id="bottom-resizer" class="drawer-resizer horizontal" role="separator" aria-orientation="horizontal" tabindex="0" title="拖动调整运行日志高度（双击重置）"></div>
+      <div id="log-panel" class="panel">
+        <div class="panel-head">
+          <span>运行日志 / 诊断</span>
+          <span class="row gap">
+            <button id="btn-ai" class="btn tiny primary" title="生成结构化 AI 诊断（含 ASCII 轮廓与扭曲指标）">AI 诊断</button>
+            <button id="btn-ai-scan" class="btn tiny" title="逐帧扫描当前状态的扭曲指标">AI 扫描</button>
+            <button id="btn-report" class="btn tiny">管线自检</button>
+            <button id="log-copy" class="btn tiny">复制</button>
+            <button id="log-clear" class="btn tiny">清空</button>
+            <button id="btn-bottom-collapse" class="btn tiny" title="收起运行日志">收起</button>
+          </span>
+        </div>
+        <div id="ai-panel" class="ai-panel hidden">
+          <div class="ai-panel-head">
+            <span>AI 诊断（文本摘要；完整 JSON 在下方折叠区）</span>
+            <span class="row gap">
+              <button id="ai-copy" class="btn tiny">复制 JSON</button>
+              <button id="ai-close" class="btn tiny">关闭</button>
+            </span>
+          </div>
+          <pre id="ai-summary" class="ai-summary"></pre>
+          <details class="ai-json">
+            <summary>完整 JSON</summary>
+            <pre id="ai-report"></pre>
+          </details>
+        </div>
+        <div id="log" class="log"></div>
+      </div>
+    </section>
+  </main>
+
+  <aside id="inspector">
+    <div class="drawer-bar">
+      <span>动画状态 / 属性</span>
+      <button id="btn-inspector-collapse" class="drawer-btn" type="button" title="收起动画状态 / 属性栏" aria-label="收起动画状态 / 属性栏">›</button>
+    </div>
+    <div id="inspector-resizer" class="drawer-resizer vertical" role="separator" aria-orientation="vertical" tabindex="0" title="拖动调整属性栏宽度（双击重置）"></div>
+    <section class="panel">
+      <div class="panel-head"><span>动画状态</span><span id="anim-count" class="muted tiny-text"></span></div>
+      <div id="state-buttons" class="state-grid">
+        <button class="state-btn" data-state="idle"><span class="state-name">待机</span><span class="state-anim">—</span></button>
+        <button class="state-btn" data-state="move"><span class="state-name">移动</span><span class="state-anim">—</span></button>
+        <button class="state-btn" data-state="battle"><span class="state-name">战斗</span><span class="state-anim">—</span></button>
+        <button class="state-btn" data-state="retreat"><span class="state-name">撤退</span><span class="state-anim">—</span></button>
+      </div>
+      <label class="field">
+        <span>手动覆盖当前状态动画</span>
+        <select id="anim-override"><option value="">跟随 G3DArmy 映射</option></select>
+      </label>
+      <div class="row gap playback">
+        <button id="btn-play" class="btn wide" title="播放/暂停（空格）">⏸ 暂停</button>
+        <button id="btn-restart" class="btn" title="回到起点（R）">↺</button>
+        <button id="btn-step-back" class="btn tiny" title="上一帧（← 或 ,）">-1f</button>
+        <button id="btn-step" class="btn tiny" title="下一帧（→ 或 .）">+1f</button>
+      </div>
+      <div class="row gap">
+        <input id="scrub" type="range" min="0" max="0" value="0" step="1" title="按帧拖动（自动暂停）">
+      </div>
+      <div class="frame-info">
+        <span id="frame-label" class="mono tiny-text">帧 — / —</span>
+        <span id="time-label" class="mono tiny-text">0.000 / 0.000s</span>
+      </div>
+      <div class="row gap">
+        <label class="inline grow"><span>速度</span><input id="speed" type="range" min="0.1" max="2" step="0.05" value="1"><span id="speed-val" class="mono">1.00×</span></label>
+        <label class="inline frame-rate-label" title="进度条/单步使用的帧率：源 = 动画关键帧网格"><span>帧率</span>
+          <select id="frame-rate" class="mini-select">
+            <option value="auto" selected>源</option>
+            <option value="24">24</option>
+            <option value="25">25</option>
+            <option value="30">30</option>
+            <option value="50">50</option>
+            <option value="60">60</option>
+          </select>
+        </label>
+      </div>
+      <label class="check"><input id="chk-clamp" type="checkbox"> 尾帧钳制（关闭 = 复刻 libGDX 外插行为）</label>
+      <div id="state-note" class="note"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><span>视角 / 适配</span><span class="muted tiny-text">G3DArmy 默认值</span></div>
+      <label class="field"><span>模型朝向 <b id="facing-val" class="mono">180°</b>（180°=正面）</span>
+        <input id="facing" type="range" min="-180" max="180" step="1" value="180"></label>
+      <label class="field"><span>相机缩放 <b id="zoom-val" class="mono">1.00×</b></span>
+        <input id="zoom" type="range" min="0.4" max="2.5" step="0.01" value="1"></label>
+      <div class="two-col">
+        <label class="field"><span>环绕方位 <b id="azimuth-val" class="mono">0°</b></span>
+          <input id="azimuth" type="range" min="-180" max="180" step="1" value="0"></label>
+        <label class="field"><span>俯仰偏移 <b id="elevation-val" class="mono">0°</b></span>
+          <input id="elevation" type="range" min="-60" max="60" step="1" value="0"></label>
+      </div>
+      <div class="row gap">
+        <button id="btn-facing-reset" class="btn tiny">朝向 0°（G3DArmy）</button>
+        <button id="btn-camera-reset" class="btn tiny">复位镜头</button>
+      </div>
+      <label class="field"><span>适配占比 <b id="fitpct-val" class="mono">0.85</b></span>
+        <input id="fitpct" type="range" min="0.4" max="1.2" step="0.01" value="0.85"></label>
+      <label class="check"><input id="chk-fitmax" type="checkbox"> 按最大边适配（马/船不裁切，modelFitBy=max）</label>
+      <label class="field inline-field"><span>视口世界高度 worldH</span><input id="worldh" type="number" min="0.5" max="50" step="0.1" value="2.2"></label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><span>渲染</span><span class="muted tiny-text">对照 G3DArmyMin</span></div>
+      <label class="field"><span>染色</span>
+        <select id="tint-mode">
+          <option value="none">不染色（查看原贴图）</option>
+          <option value="player">玩家绿 (0.33,0.58,0.30)</option>
+          <option value="enemy">敌方红 (0.62,0.26,0.22)</option>
+          <option value="ally">友方蓝 (0.32,0.46,0.66)</option>
+          <option value="neutral">中立 (0.62,0.58,0.50)</option>
+          <option value="custom">自定义颜色</option>
+        </select></label>
+      <div class="row gap">
+        <input id="tint-color" type="color" value="#54a04d" title="自定义染色">
+        <label class="inline grow"><span>强度</span><input id="tint-strength" type="range" min="0" max="1" step="0.01" value="0.45"><span id="tint-strength-val" class="mono">0.45</span></label>
+      </div>
+      <label class="field"><span>脚底 AO 亮度 <b id="footdark-val" class="mono">0.50</b></span>
+        <input id="footdark" type="range" min="0.05" max="1" step="0.01" value="0.5"></label>
+      <div class="checks">
+        <label class="check"><input id="chk-shadow" type="checkbox" checked> 接触阴影</label>
+        <label class="check"><input id="chk-skeleton" type="checkbox"> 骨架高亮</label>
+        <label class="check"><input id="chk-grid" type="checkbox"> 地面网格</label>
+        <label class="check"><input id="chk-white" type="checkbox"> 全白模型（whiteModel）</label>
+      </div>
+      <label class="field inline-field"><span>骨架模式</span>
+        <select id="skeleton-mode">
+          <option value="all">全部骨骼</option>
+          <option value="animated">仅动画骨</option>
+          <option value="selected">选中骨（API）</option>
+          <option value="problems">问题骨（诊断）</option>
+        </select></label>
+    </section>
+
+    <section class="panel" id="vfx-panel">
+      <div class="panel-head"><span>攻击粒子 / 状态机</span><span id="vfx-badge" class="badge">自动</span></div>
+      <label class="check"><input id="chk-particles" type="checkbox" checked> 攻击粒子（EU5 animsm 事件）</label>
+      <label class="field"><span>武器类型</span>
+        <select id="particle-weapon">
+          <option value="auto" selected>自动识别</option>
+          <option value="musket">火枪 musket</option>
+          <option value="arquebus">火绳枪 arquebus</option>
+          <option value="handgonne">手炮 handgonne</option>
+          <option value="pistol">手枪 pistol</option>
+          <option value="bow">弓 bow</option>
+          <option value="crossbow">弩 crossbow</option>
+          <option value="sword">剑/近战 sword</option>
+          <option value="spear">矛/长柄 spear</option>
+          <option value="cannon">火炮 cannon</option>
+          <option value="none">关闭</option>
+        </select>
+      </label>
+      <div id="particle-note" class="note">战斗状态按 EU5 绝对时间触发：火枪枪口 1.6616s / 点火 1.5434s。</div>
+      <label class="check"><input id="chk-eu5-sm" type="checkbox"> EU5 状态机演示（UnitState 驱动）</label>
+      <label class="field"><span>UnitState</span>
+        <select id="eu5-state">
+          <option value="0">0 Idle</option>
+          <option value="1" selected>1 Attack</option>
+          <option value="2">2 Move</option>
+          <option value="3">3 Retreat</option>
+          <option value="4">4 Charge</option>
+        </select>
+      </label>
+      <label class="check"><input id="chk-sm-random" type="checkbox"> 进入时随机相位（unsynced_random_on_enter）</label>
+      <label class="check"><input id="chk-sm-auto" type="checkbox"> 自动循环 UnitState</label>
+      <div id="sm-note" class="note">Idle→Attack 等当前时间线结束；Attack→Move/Idle 立即。</div>
+    </section>
+
+    <section class="panel" id="runtime-panel">
+      <div class="panel-head"><span>G3DArmy 装配</span><span id="runtime-badge" class="badge">无配置</span></div>
+      <div id="runtime-note" class="note">按 loadSelect / attachments / assembly / civilization 自动解析</div>
+      <label class="field"><span>兵种规则</span><select id="runtime-rule"></select></label>
+      <label class="field"><span>文化 Group</span><select id="runtime-group"></select></label>
+      <label class="field"><span>文明覆盖（civilization）</span><select id="runtime-civ"></select></label>
+      <label class="field inline-field"><span>等级 level</span><input id="runtime-level" type="number" min="0" max="30" step="1" placeholder="auto"></label>
+      <label class="field inline-field"><span>兵团 aID</span><input id="runtime-aid" type="number" min="0" max="99" step="1" placeholder="auto"></label>
+      <label class="field"><span>宗教 religion（名称/ID）</span><input id="runtime-religion" type="text" placeholder="Catholic / 0"></label>
+      <label class="field inline-field"><span>宗教组 religionGroup</span><input id="runtime-religion-group" type="number" min="0" max="99" step="1" placeholder="0~5"></label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><span>模型信息 / 自检</span><span id="check-badge" class="badge">—</span></div>
+      <div id="stats" class="stats"></div>
+      <div id="warn-list" class="warn-list"></div>
+    </section>
+  </aside>
+
+  <button id="sidebar-open" class="drawer-open-tab left" type="button" title="展开模型栏">模型</button>
+  <button id="inspector-open" class="drawer-open-tab right" type="button" title="展开动画状态 / 属性栏">属性</button>
+  <button id="bottom-open" class="drawer-open-tab bottom" type="button" title="展开运行日志">日志</button>
+</div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
