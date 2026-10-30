@@ -33,7 +33,7 @@ target\release\g3d-web.exe --root .. --open
   `setWidth('sidebar'|'inspector'|'bottom', px)`、`collapse(kind)`、`expand(kind)`、
   `toggleTags()`、`toggleList()`、`reset()`、`state`。
 
-打开后自动发现 root 下的模型项目并动态分组；直接指向 `age3mudels/G3DArmy` 或 `ww1models/G3DArmy` 时扫描 `models/main/g3d`（分别为 21 / 33 个主模型）。同一父目录下的旧 `combos`、`ww1`、`ww1_climate` 等只是导出源，已有 `G3DArmy` 时不再重复列出。
+打开后自动发现 root 下的模型项目并动态分组；直接指向 `age3mudels/G3DArmy` 或 `ww1models/G3DArmy` 时扫描 `models/main/g3d`（分别为 21 / 40 个主模型）。同一父目录下的旧 `combos`、`ww1`、`ww1_climate` 等只是导出源，已有 `G3DArmy` 时不再重复列出。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -94,7 +94,7 @@ target\release\g3d-web.exe --root .. --open
   `models/assembly.json`、`models/main/g3d`、`loadSelect.json`、
   `loadSelect.override.json`、`civilization/<tag>.json`；旧
   `runtime/attachments.json + runtime/parts` 仍兼容；
-- **v4.7 规则**（`web/runtime_rules.js`，与 `G3DArmyPlugin` v4.7.0 同步）：
+- **v4.7.0 起的选择语义**（`web/runtime_rules.js`，与 `G3DArmyPlugin` v4.9.14 同步）：
   `loadSelect.json` 的 `unitSelect` 可以是**宗教块数组**（`[{ "religion": "Catholic", "0:Warior": {...} }]`）
   或旧格式对象；`unitgroup` 是文化组兜底（`unitgroup.<文化组>.<兵种>.level` 或直接按兵种写）；
   条目内优先级 `byId > religion > religionGroup > group > level > default`，
@@ -110,13 +110,21 @@ target\release\g3d-web.exe --root .. --open
 - 把 part 的 `bones[].invBind` 保持为单位阵（G3DArmy runtime attachment 约定）并改绑到目标骨骼；
 - 应用 `attachments.strip`：combo 命中 `strip.combos` 时，先删除名字含 `strip.tokens`
   的 baked 武器/盾，再挂装配件；
-- 按 G3DArmy v4.4 的 **武器决定动画**：读 `assembly.animDonors[<rig>.<武器族>]`，把 donor
+- 按 G3DArmy v4.4 的 **武器决定动画**：读 `assembly.animDonors[<rig>.<武器族>]`
+  （`rig` 缺省时按 `rigs[0]`，与插件一致），把 donor
   的动画轨道按 boneId 重绑到当前模型并替换动画；例如 `foot_euro_line` 挂弓会借
-  `foot_eastasia_medieval` 的弓动画；
+  `foot_eastasia_medieval` 的弓动画，`mounted_*`（`rig: "mounted"`）则借骑乘 donor，保留 `horse` 行进轨；
 - 船模走 `attachments.shipSelect`，陆战走 `unitSelect / unitgroup`；旧字段 `rules` 仍兼容；
+- **攻击事件表**（与 `G3DArmyMin.weaponProfileFor` 一致）：先用挂件签名判武器族，
+  再按 `assembly.combos[<combo>].animSet`（字符串或数组，如 `["musket_r","horse"]`）
+  逐个查，最后用 `combos[<combo>].group`（`artillery`/`ship` 伪 animSet）；
+  `anim_events.json` 的 `weapons[*].animSets` 会先反查成 `animSet → 事件表`；
+  **完全没命中 = 没有攻击粒子**（与插件相同，不再退回旧 EU5 硬编码表，手动下拉覆盖时才用）；
+- 按 `setting.json` 应用 `modelFitPct` / `modelFitBy` / `shadowScale` / `shadowCore` / `shadowBake`
+  （v4.9.2 起核心阴影默认烘焙进贴图，只画一层；`shadowBake=false` 才回到双层）；
 - 部件跟随目标骨架动画矩阵运动，但不参与本体包围盒/接触阴影；
 - 右侧「G3DArmy 装配」面板显示规则、Group、文明覆盖、`religion / religionGroup`、
-  `partsPng`、动画 donor 和已挂载部件；手动选择只用于调试，自动结果默认按模型反推。
+  `animSet`、攻击事件表、`partsPng`、动画 donor 和已挂载部件；手动选择只用于调试，自动结果默认按模型反推。
 - 攻击粒子首帧规则与游戏 `tickBattle(prev<0)` 一致：**进入战斗的第一次 tick 只补 `t≈0` 事件**，
   不补随机起始相位之前的历史事件；深链直接跳到事件时间时，先播放/回绕一帧即可触发。
 
@@ -145,10 +153,57 @@ target\release\g3d-web.exe --root .. --open
   - 四个状态按钮 + 当前状态的手动动画覆盖（下拉选择任意动画 ID）。
   - 播放/暂停/**±1 帧**/**按帧拖动**/速度/帧率；每个状态独立计时（与 G3DArmy 的 4 个控制器一致）。
   - 模型朝向、相机缩放、环绕/俯仰、自动适配占比、`fitByMax`、`worldH`。
+  - **摆放 / 缩放（改模型）**：参考点下拉（包围盒中心 / 脚底中心 / 自定义）+ X/Y/Z + 总缩放 +
+    参考点黑白小球高亮开关；改的是模型本身（骨架/挂件/阴影/粒子一起动），相机不变；见下文同名小节。
+    选中模型后（左键点模型）可直接在画布上拖动摆放，中键/滚轮控制视角，见「画布鼠标操作」。
   - 染色（玩家/敌/友/中立/自定义 + 强度）、脚底 AO、接触阴影、骨架线框、地面网格、全白模型。
   - 模型信息、绑定矩阵误差、警告列表。
 - **快捷键**：`1–4` 切状态，空格播放/暂停，`←`/`→`（或 `,`/`.`）上一帧/下一帧，
-  `R` 回到起点，`[`/`]` 上/下一个模型，`G` 网格，`S` 骨架，`W` 全白。
+  `R` 回到起点，`[`/`]` 上/下一个模型，`G` 网格，`S` 骨架，`W` 全白，
+  `Ctrl+Z` 撤销上一步，`Ctrl+Shift+Z`（或 `Ctrl+Y`）重做。
+
+### 画布鼠标操作（按键捕获）
+
+3D 视口直接接管鼠标，不用去右边拖滑块：
+
+| 操作 | 效果 |
+| --- | --- |
+| **中键拖动**（按住滚轮上下左右） | 环绕方位 + 俯角偏移（0.6°/px，与右侧两个滑块双向同步） |
+| **滚轮** | 相机缩放（范围 0.4×–2.5×，与「相机缩放」滑块同步） |
+| **左键点击模型** | 选中：整只模型加**青色外描边**高亮（名字/状态栏会出现 `选中模型`） |
+| **左键点击空白处** | 取消选中（描边消失） |
+| **选中后左键拖动模型** | 移动模型摆放：世界位移写进 `placement.position`，相机不动，属性页 X/Y/Z 实时更新 |
+| 右键 / 中键 `auxclick` | 屏蔽浏览器菜单与自动滚动，避免打断拖拽 |
+
+- 命中测试是 **CPU 蒙皮 + 逐三角形 NDC 判定**（和当前动画帧完全同源），不是包围盒近似；
+  点在部件之间的空隙（比如两腿之间）会被正确判为空白。
+- 拖动有 **3px 死区**：只点一下不会把模型挪出 1~2px；真正的拖动才写 `placement.position`。
+- 拖动位移换算用相机平面基（`(worldH × zoom) / 画布高度`），按住模型时**1px 跟手**，
+  左右拖改世界 X/Z 平面、上下拖改 Y；相机保持不动（改模型不改视角）。
+
+```js
+window.__g3dweb.pickModel(120, 260);      // 画布 CSS 像素 → { hit, reason, part, triangle }
+window.__g3dweb.selectModel3D(true);      // 点亮 / 取消选中描边（等价点一下模型）
+window.__g3dweb.isSelected();
+window.__g3dweb.setCamera({ zoom: 1.4, azimuth: 30, elevation: 12 }); // 相机三者一次设
+window.__g3dweb.getCamera();              // { zoom, azimuth, elevation, camera:{eye,target,...} }
+window.__g3dweb.undo();                   // 撤销上一步（同 Ctrl+Z）
+window.__g3dweb.redo();                   // 重做（同 Ctrl+Shift+Z / Ctrl+Y）
+window.__g3dweb.history();                // { undo:[label...], redo:[...], canUndo, canRedo }
+```
+
+### 撤销 / 重做（上一步 / 下一步）
+
+属性页「摆放 / 缩放」面板里有 **↶ 撤销 / ↷ 重做** 两个按钮（右侧日志会写出撤销了哪一步），
+也可以按 `Ctrl+Z` / `Ctrl+Shift+Z`（`Ctrl+Y`）：
+
+- **作用域**：摆放 / 缩放（含拖动摆放、X/Y/Z、缩放比例、复位）、参考点（切换 / 自定义 / 局部坐标）、
+  视角（缩放 / 环绕方位 / 俯仰偏移 / 模型朝向）。渲染开关（染色、阴影、网格…）不记录。
+- **一次连续操作 = 一条记录**：拖动模型、中键环绕、连续滚轮、拖滑块都只压一条，
+  避免逐帧移动把撤销栈填满；点一下不产生位移则不记录。
+- 撤销会把「模型 + 视角」一起还原到该操作**之前**的状态（改模型、改视角都能退回）。
+- 换模型会清空撤销栈（自定义参考点存的是模型空间坐标，跨模型没有意义）；
+  栈上限 100 步。在输入框里按 `Ctrl+Z` 仍是输入框原生的文本撤销。
 
 ### 精确到帧
 
@@ -289,6 +344,44 @@ window.__g3dweb.worldToScreen([0, 1, 0]);
 
 `window.__g3dweb.set({ position, rotation, scale, pivot, skeleton, bones })` 也可一次应用；
 放置变换同时作用于骨架、接触阴影、攻击粒子锚点和 `diagnose()` 的屏幕投影。
+
+### 属性页「摆放 / 缩放」（改模型，不是镜头）
+
+右侧属性栏的 **摆放 / 缩放（改模型）** 面板直接编辑模型本身的变换（等价 `placeModel` /
+`scaleModel`），骨架、挂件、接触阴影、粒子锚点会一起移动/缩放，相机不变：
+
+- **参考点（相对定位基准）** 下拉决定「X / Y / Z」指向哪个点（都是**场景绝对坐标**）：
+  - `包围盒中心（默认）`：模型包围盒（绑定姿势、不含运行时挂件）的几何中心；
+  - `脚底中心（模型最下方）`：包围盒最下层（`min.y`）在 X/Z 上的中心 = 模型“脚”的中心；
+  - `自定义`：与模型几何**脱绑** —— 切换时把当前参考点的局部坐标冻结下来（模型不动），
+    之后坐标由你直接指定；下拉下方会出现 `x / y / z + 设定` 输入行，填完按回车或点「设定」
+    即把该点当作参考点、模型整体跟着它移动到该坐标。
+- **X / Y / Z**：当前参考点的场景绝对坐标，手改即平移 `placement.position` 让参考点落到输入值
+  （加性平移，立即生效；改的是模型本身）。切换预设只重算这三个数，**不会移动模型**。
+- **缩放比例（总）** = 自动适配(`fitScale`) × 摆放缩放(`placement.scale`)；
+  改它会等比乘 `placement.scale`。缩放围绕**脚底 pivot**，脚底不动、中心高度会随之变化。
+- 下方实时显示：参考点名称/局部坐标、包围盒中心、脚底中心、总缩放、`自动适配 × 摆放`、
+  场景单位尺寸、`placement.position`；徽标 `已改模型` / `自定义参考点` / `G3DArmy 默认`。
+- **参考点高亮**（勾选框，默认关）：场景里用**黑白四象限小球**标出当前参考点位置；
+  固定屏幕像素大小（缩放不改变大小）、关深度测试始终画在最上层，跟着模型移动/旋转/缩放。
+- 「复位摆放 / 缩放」= `resetPlacement()`（同时清掉自定义参考点，基准回到包围盒中心）。
+- 摆放/缩放/参考点是**页面级状态**：切换模型会保留（方便同位置对比两个模型），复位或刷新清空。
+
+```js
+const m = window.__g3dweb.getModelMetrics();
+// { ref, refPoint, refLocal, center, feetCenter, feet, scale, fitScale, placementScale, size, placement, units }
+window.__g3dweb.setModelReference('custom');       // 'center' | 'feetCenter' | 'custom'
+window.__g3dweb.setCustomRefPoint([0.4, 0.25, -0.1]); // 脱绑：直接把该场景坐标设为参考点
+window.__g3dweb.setCustomRefLocal([0, 60, 0]);     // 只改参考点局部坐标（模型空间），不影响模型位置
+window.__g3dweb.getModelReference();               // { ref, point } 当前参考点场景绝对坐标
+window.__g3dweb.setModelCenter([0.3, 0.1, -0.2]);  // 同「X/Y/Z」（按当前参考点）
+window.__g3dweb.setModelCenter([0, 0, 0], 'feetCenter'); // 也可显式指定参考点
+window.__g3dweb.getPlacement().metrics;            // 与 getPlacement() 一起返回
+window.__g3dweb.diagnose().modelMetrics;           // 与 diagnose() 一起返回
+window.__g3dweb.setRefMarker(false);               // 关掉场景里的参考点黑白小球（面板勾选框同款）
+```
+
+场景单位随 `worldH` 变化：默认 `worldH=2.2`、`fitPct=0.8` 时成年兵高约 1.76。
 
 ### 骨架 / 绑定检查 + 高亮
 
@@ -439,7 +532,9 @@ issues: deformation/warn[1], deformation/warn[2], seat/info
 | 环境光 `(0.52,0.49,0.44)` + 平行光 `(0.85,0.79,0.66)`、方向 `(-0.9,-1.3,-0.7)` | 主着色器 `AMBIENT` / `LIGHT_COLOR` / `LIGHT_DIR`，片元 `diffuse * (ambient + NdotL * light) + emissive` |
 | `buildUserInstances/buildModelSet` 自动适配：`worldH*fitPct/ref`、脚底贴地、水平居中 | `renderer.js` 每帧根据 `bounds` 计算 `fit = T*S`，`modelFitBy=height/max` |
 | `bounds` = `computeBodyBounds()`：第一根骨骼的 `bindWorld * invBind`、脚底 12% 带锚点、±35% 限幅 | `g3dj.js` `computeBodyBounds()`，逐顶点两遍扫描 |
-| `buildSoftShadow()` 64×64 `(1-d)^2*0.42`、直径 1.24、主阴影 0.75 + 0.6 核心 | `renderer.js` `createShadowTexture()` + `drawShadow()`（深度写入关闭，视觉等价） |
+| `buildSoftShadow()` 64×64 `(1-d)^2*0.42`、直径 1.24、主阴影 0.75 + 0.6 核心 | `renderer.js` `createShadowTexture()` + `drawShadow()`（深度写入关闭，视觉等价；v4.9.2 起按 `shadowBake` 烘焙核心、只画一层） |
+| `setting.json`：`modelFitPct` / `modelFitBy` / `shadowScale` / `shadowCore` / `shadowBake` | 加载模型时读取并套用（其余窗口/相机键只打印到日志，仍按插件默认值 0.85/height 起） |
+| `weaponProfileFor(comboId, attachSig)`：武器族 > `animSet` 列表 > `group`；`profilesByAnimSet` 由 `weapons[*].animSets` 反查 | `anim_events.js` `weaponProfileFor()` + `profilesByAnimSet()`；未命中返回 null（= 无粒子，与插件一致） |
 | `applyVerticalShade()`：全局 Y 范围、`k=bottom+(1-bottom)*pow(t,1.3)`、有顶点色的网格跳过 | `renderer.js` `setModel()` 生成每顶点颜色；`isUniformVertexColor()` 复刻均匀顶点色剥离 |
 | `applyTint()/resetTint()`：`base+(tint-base)*strength`、跳过 `head/skin` 材质 | `renderer.js` 绘制循环中的材质漫反射色计算 |
 | `resolveAnim()`：`idle/stand/...`、`walk/run/move/...`、`attack/battle/...`、`retreat/flee/run/...`；撤退回退移动 | `g3dj.js` `KW_*` 与 `resolveAnim()` 逐字复刻；UI 显示“回退” |
@@ -475,9 +570,14 @@ issues: deformation/warn[1], deformation/warn[2], seat/info
 - WebGL1 + 非 2 的幂贴图：libGDX 的 `REPEAT` 在 GLES2 下不完整，本工具改用 `CLAMP_TO_EDGE` 并提示。
 - **长模型自动 `fitByMax`**（马/象/船）是本工具的便利默认；G3DArmy 默认是 `height`。
   取消勾选「按最大边适配」即可回到默认。
-- 默认「模型朝向 180°」是为了直接看正面；G3DArmy 的朝向来自行军方向（`modelYaw=0`）。
-  点击「朝向 0°（G3DArmy）」恢复。
+- 默认「模型朝向 180°」是为了直接看正面；G3DArmy 的朝向来自 `setting.json` 的 `modelYaw`
+  （当前导出的配置也是 `180`，即背对行军方向），点「朝向 0°」可对比未修正的姿态。
 - 阴影/骨架/网格是调试辅助；阴影关闭深度写入以避免与核心阴影互相遮挡。
+- `age3mudels/G3DArmy` 的 `models/attachments.json` 由
+  `age3mudels/tools/build_load_config.py` 生成（文化选身体、宗教+文化选武器），
+  `strip.combos` 现在是 `["foot_", "mounted_"]`，`unitSelect` 是「宗教 + 文化」双条件块、
+  `unitgroup` 是文化默认武器；**任何空数组都会让该等级段空手**，生成器里
+  `combatWithoutWeapon=0` 是硬约束。`ww1models/G3DArmy` 则是步枪/机枪各自的规则。
 
 ## 文件结构
 
@@ -486,8 +586,14 @@ modeltools/
   src/bin/g3d_web.rs      本地 HTTP 服务（内嵌资源、模型扫描、路径穿越防护）
   web/index.html          页面骨架
   web/style.css           深色 UI
-  web/app.js              模型列表 / 四态控制器 / 控件 / 自检
+  web/app.js              模型列表 / 四态控制器 / 控件 / 自检 / AI 诊断
   web/g3dj.js             g3dj 解析、绑定/动画采样、四态映射、包围盒
-  web/renderer.js         WebGL 渲染器（蒙皮/光照/阴影/骨架/网格）
+  web/renderer.js         WebGL 渲染器（蒙皮/光照/阴影/骨架/网格/粒子锚点）
+  web/runtime_rules.js    G3DArmy 选型 + 挂件规则（与 G3DArmyPlugin v4.9.14 同步）
+  web/anim_events.js      anim_events.json 事件表 / weaponProfileFor / 攻击锚点
+  web/particles.js        CPU 粒子池 + billboard
+  web/unit_state_machine.js  EU5 状态机（可选调试视图）
+  web/layout_drawers.js   抽屉布局（宽度/折叠持久化）
   web/math.js             列主序矩阵 / 四元数（对齐 libGDX 约定）
+  tools/g3d-web-serve.ps1 幂等启动/复用脚本
 ```

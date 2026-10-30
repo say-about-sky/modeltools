@@ -1,6 +1,7 @@
-// G3DArmy v4.7.0 运行时装配规则（g3d-web 版）
+// G3DArmy v4.9.14 运行时装配规则（g3d-web 版）
 //
-// 与 A:\android\Age.of.History.3\G3DArmy\src\com\saysky\g3darmy\G3DArmyPlugin.java 保持同步：
+// 与 A:\android\Age.of.History.3\G3DArmy\src\com\saysky\g3darmy\G3DArmyPlugin.java 保持同步
+// （v4.7.0 起选择语义未变；v4.8/4.9 只动了渲染窗口/相机/缓存，本文件只负责选型与挂件）：
 //   loadSelect.json:
 //     unitSelect = 宗教块数组 [ { "religion": "Catholic", "0:Warior": { level: {...} } }, ... ]
 //                  或旧格式对象 { "0:Warior": {...} }
@@ -93,6 +94,40 @@ export function isShipModel(model) {
   const category = String(model?.category || '').toLowerCase();
   const name = String(model?.name || '').toLowerCase();
   return category === 'ship' || name.startsWith('ship_');
+}
+
+/**
+ * G3DArmyMin.weaponFamilyFromSig 的 JS 版：挂件签名 → 武器族
+ * （crossbow / musket / bow / spear / sword；null = 没挂件/认不出）。
+ * 插件里有两处用它：① assembly.animDonors 借动画；② anim_events.json 的攻击事件表。
+ */
+export function weaponFamilyFromSig(sig) {
+  if (sig == null || sig === '') return null;
+  const s = String(sig).toLowerCase();
+  if (s.includes('crossbow')) return 'crossbow';
+  if (['musket', 'flintlock', 'matchlock', 'arquebus', 'handgonne', 'handgonna', 'pistol']
+    .some((x) => s.includes(x))) return 'musket';
+  if (s.includes('bow')) return 'bow';
+  if (['spear', 'pike', 'lance', 'halberd'].some((x) => s.includes(x))) return 'spear';
+  if (['sword', 'blade', 'saber', 'rapier', 'axe', 'mace', 'knife', 'katar']
+    .some((x) => s.includes(x))) return 'sword';
+  return null;
+}
+
+/**
+ * assembly.combos[*].animSet 允许字符串或数组（v4.4+，如 `["musket_r", "horse"]`），
+ * 插件会拼成逗号串再按逗号拆；这里统一成去空列表（顺序不变）。
+ */
+export function animSetList(value) {
+  if (value == null) return [];
+  const out = [];
+  for (const item of Array.isArray(value) ? value : [value]) {
+    for (const part of String(item).split(',')) {
+      const s = part.trim();
+      if (s) out.push(s);
+    }
+  }
+  return out;
 }
 
 export function runtimeCiv(runtime, civTag) {

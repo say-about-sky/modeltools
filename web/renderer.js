@@ -17,7 +17,7 @@ import {
 import { samplePose } from './g3dj.js';
 import { ParticleSystem } from './particles.js';
 import {
-  detectWeapon, eventListFor, computeAttackAnchor, crossed, weaponLabel,
+  detectWeapon, eventListFor, computeAttackAnchor, crossed, weaponLabel, weaponProfileFor,
 } from './anim_events.js';
 
 // G3DArmyMin.init() 的环境光照
@@ -39,6 +39,13 @@ export const G3D_DEFAULTS = {
   tintSkip: ['head', 'skin'],
   shadowScale: 1,
   shadowCore: 0.6,
+  // v4.9.2：核心阴影烘焙进贴图（true = 只画一层，与插件默认一致）
+  shadowBake: true,
+  // 参考点高亮小球半径（CSS 像素）
+  refMarkerPx: 9,
+  // 选中描边：模型绕包围盒中心放大比例 + 描边颜色（青绿，与强调色一致）
+  outlineScale: 1.035,
+  outlineColor: [0.36, 0.90, 0.82, 1],
   anchorBand: 0.12,
   modelYaw: 0,
 };
@@ -88,7 +95,10 @@ export class Renderer {
     this.gpu = null;
     this.textureCache = new Map();
     this.whiteTex = this.createSolidTexture([255, 255, 255, 255]);
-    this.shadowTex = this.createShadowTexture();
+    this.shadowScale = G3D_DEFAULTS.shadowScale;
+    this.shadowCore = G3D_DEFAULTS.shadowCore;
+    this.shadowBake = G3D_DEFAULTS.shadowBake;
+    this.shadowTex = this.createShadowTexture(this.shadowBake, this.shadowCore);
     this.grid = this.createGrid();
     this.lineBuf = gl.createBuffer();
     this.lineData = new Float32Array(0);
@@ -97,6 +107,7 @@ export class Renderer {
     this.drawStats = { calls: 0, triangles: 0 };
     this.poseAnimated = new Set();
     this.feetDark = G3D_DEFAULTS.feetDark;
+    this.lastModel = null;
     // 最近一帧的投影/世界矩阵（AI 诊断用来做 CPU 投影与 ASCII 轮廓）
     this.lastProjView = new Float32Array(16);
     this.lastWorld = new Float32Array(16);
@@ -179,8 +190,15 @@ uniform vec4 u_diffuseColor;
 uniform vec3 u_emissive;
 uniform float u_useTexture;
 uniform float u_white;
+uniform float u_flat;
+uniform vec4 u_flatColor;
 
 void main() {
+  // 选中描边：纯色通道（模型放大一圈后画背面 = 外轮廓）
+  if (u_flat > 0.5) {
+    gl_FragColor = u_flatColor;
+    return;
+  }
   vec4 tex = vec4(1.0);
   if (u_useTexture > 0.5 && u_white < 0.5) {
     tex = texture2D(u_diffuseTexture, v_texCoord0);
@@ -214,6 +232,8 @@ void main() {
         lightDir: gl.getUniformLocation(prog, 'u_lightDir'),
         useTexture: gl.getUniformLocation(prog, 'u_useTexture'),
         white: gl.getUniformLocation(prog, 'u_white'),
+        flat: gl.getUniformLocation(prog, 'u_flat'),
+        flatColor: gl.getUniformLocation(prog, 'u_flatColor'),
       },
       maxBones,
       boneScratch: new Float32Array(maxBones * 16),
@@ -346,23 +366,37 @@ void main() {
     return tex;
   }
 
-  /** 与 G3DArmyMin.buildSoftShadow 相同的 64x64 径向渐变（alpha=(1-d)^2*0.42）。 */
-  createShadowTexture() {
+  /**
+   * 与 G3DArmyMin.buildSoftShadow 相同的 64x64 径向渐变（alpha=(1-d)^2*0.42）。
+   * v4.9.2：`shadowBake=true` 时把「接触核心」烘焙进同一张贴图（每个模型少一次 draw call）。
+   * 烘焙公式与 G3DArmyMin.buildSoftShadow 一致：
+   *   A = 1 - (1 - 0.75·a1)·(1 - a2)，a1/a2 = (1-d)²·0.42，a2 按 d/core 采样。
+   */
+  createShadowTexture(bakeCore = true, core = 0.6) {
     const gl = this.gl;
     const S = 64;
+    const bake = !!bakeCore && core > 0.05 && core < 0.99;
     const data = new Uint8Array(S * S * 4);
     for (let y = 0; y < S; y++) {
       for (let x = 0; x < S; x++) {
         const dx = (x - (S - 1) * 0.5) / (S * 0.5);
         const dy = (y - (S - 1) * 0.5) / (S * 0.5);
         const d = Math.hypot(dx, dy);
-        let a = 1 - d;
-        if (a < 0) a = 0;
+        let a1 = 1 - d;
+        if (a1 < 0) a1 = 0;
+        const a1a = a1 * a1 * 0.42;
+        let alpha = a1a;
+        if (bake) {
+          const uc = d / core;
+          const a2 = uc < 1 ? 1 - uc : 0;
+          const a2a = a2 * a2 * 0.42;
+          alpha = 1 - (1 - 0.75 * a1a) * (1 - a2a);
+        }
         const i = (y * S + x) * 4;
         data[i] = 0;
         data[i + 1] = 0;
         data[i + 2] = 0;
-        data[i + 3] = Math.round(a * a * 0.42 * 255);
+        data[i + 3] = Math.round(Math.max(0, Math.min(1, alpha)) * 255);
       }
     }
     const tex = gl.createTexture();
@@ -373,6 +407,148 @@ void main() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return tex;
+  }
+
+  /** setting.json 的阴影三项（shadowScale / shadowCore / shadowBake）→ 重建阴影贴图。 */
+  setShadowStyle({ scale, core, bake } = {}) {
+    if (Number.isFinite(Number(scale)) && Number(scale) > 0.05) {
+      this.shadowScale = Number(scale);
+    }
+    const nextCore = Number.isFinite(Number(core)) && Number(core) > 0 ? Number(core) : G3D_DEFAULTS.shadowCore;
+    const nextBake = bake == null ? this.shadowBake : !!bake;
+    if (nextCore === this.shadowCore && nextBake === this.shadowBake && this.shadowTex) return;
+    this.shadowCore = nextCore;
+    this.shadowBake = nextBake;
+    const gl = this.gl;
+    if (this.shadowTex) gl.deleteTexture(this.shadowTex);
+    this.shadowTex = this.createShadowTexture(this.shadowBake, this.shadowCore);
+  }
+
+  /**
+   * 参考点高亮贴图：黑白四象限的圆形小球（外圈描边 + 球面明暗），
+   * 屏幕空间固定像素大小绘制，所以看起来始终是一个圆。
+   */
+  createRefMarkerTexture(size = 64) {
+    const gl = this.gl;
+    const S = size;
+    const data = new Uint8Array(S * S * 4);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = (x + 0.5) / (S * 0.5) - 1;
+        const v = (y + 0.5) / (S * 0.5) - 1;
+        const d = Math.hypot(u, v);
+        const i = (y * S + x) * 4;
+        if (d > 1) {
+          data[i + 3] = 0;
+          continue;
+        }
+        // 四象限交替黑白
+        const quad = (u >= 0 ? 1 : 0) + (v >= 0 ? 2 : 0);
+        let c = (quad === 0 || quad === 3) ? 242 : 22;
+        // 球面明暗：中心亮、边缘暗
+        const shade = 0.72 + 0.32 * Math.sqrt(Math.max(0, 1 - d * d));
+        c = Math.round(c * shade);
+        // 描边：内层深色 + 外层浅色环，暗背景下也能看清（“高亮”）
+        if (d > 0.84 && d <= 0.93) c = 18;
+        else if (d > 0.93) c = 236;
+        let a = 255;
+        if (d > 0.97) a = Math.round(255 * (1 - (d - 0.97) / 0.03)); // 抗锯齿
+        data[i] = c;
+        data[i + 1] = c;
+        data[i + 2] = c;
+        data[i + 3] = Math.max(0, a);
+      }
+    }
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, S, S, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  /** 参考点小球：直接用 NDC 坐标绘制（屏幕空间固定大小，不随缩放变大变小）。 */
+  createRefMarkerProgram() {
+    const gl = this.gl;
+    const vs = `attribute vec2 a_pos;
+attribute vec2 a_uv;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+    const fs = `precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
+void main() {
+  vec4 t = texture2D(u_tex, v_uv);
+  if (t.a < 0.01) discard;
+  gl_FragColor = t;
+}`;
+    const prog = this.linkProgram(vs, fs, 'ref-marker');
+    const buf = gl.createBuffer();
+    return {
+      prog,
+      buf,
+      attrs: {
+        pos: gl.getAttribLocation(prog, 'a_pos'),
+        uv: gl.getAttribLocation(prog, 'a_uv'),
+      },
+      uniforms: { tex: gl.getUniformLocation(prog, 'u_tex') },
+      tex: this.createRefMarkerTexture(),
+    };
+  }
+
+  /**
+   * 在场景里画出参考点位置（黑白小球，始终画在最上层）。
+   * @param {number[]} projView 当前投影×视图矩阵
+   * @param {number[]} point 场景绝对坐标
+   * @param {number} radiusPx 半径（CSS 像素）
+   */
+  drawRefMarker(projView, point, radiusPx = G3D_DEFAULTS.refMarkerPx) {
+    if (!point || !projView) return;
+    if (!this.refMarker) this.refMarker = this.createRefMarkerProgram();
+    const gl = this.gl;
+    const clip = [0, 0, 0];
+    mat4TransformPoint(clip, projView, point[0], point[1], point[2]);
+    if (!Number.isFinite(clip[0]) || !Number.isFinite(clip[1])) return;
+    const canvas = this.lastCanvas || {};
+    const w = Math.max(1, canvas.drawW || 1);
+    const h = Math.max(1, canvas.drawH || 1);
+    const scale = w / Math.max(1, canvas.cssW || w);      // device px / css px
+    const rx = (radiusPx * scale * 2) / w;
+    const ry = (radiusPx * scale * 2) / h;
+    const x = clip[0];
+    const y = clip[1];
+    if (x < -1 - rx || x > 1 + rx || y < -1 - ry || y > 1 + ry) return;
+    const verts = new Float32Array([
+      x - rx, y - ry, 0, 0,
+      x + rx, y - ry, 1, 0,
+      x + rx, y + ry, 1, 1,
+      x - rx, y - ry, 0, 0,
+      x + rx, y + ry, 1, 1,
+      x - rx, y + ry, 0, 1,
+    ]);
+    const m = this.refMarker;
+    gl.useProgram(m.prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.buf);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+    this.bindAttribute(m.attrs.pos, 2, 16, 0);
+    this.bindAttribute(m.attrs.uv, 2, 16, 8);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, m.tex);
+    gl.uniform1i(m.uniforms.tex, 0);
+    gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.CULL_FACE);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.enable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    this.drawStats.calls++;
   }
 
   async resolveTexture(asset, filename) {
@@ -471,19 +647,30 @@ void main() {
     const gl = this.gl;
     this.disposeGpu();
     this.asset = asset;
-    // G3DArmy runtime 的 animSet 优先（WW1 步枪/机枪等自定义 profile）。
+    // G3DArmy v4.9：攻击事件表按「挂件签名 > animSet > group」取（与 G3DArmyMin 一致）；
+    // 没有 G3DArmy 配置的旧 combos 布局才退回 EU5 硬编码表 + 部件名识别。
     const rt = asset && asset.runtime;
-    const rtWeapon = rt && rt.animSet && rt.animEvents && (rt.animEvents.weapons || {})[rt.animSet]
-      ? rt.animSet
-      : null;
-    this.weapon = rtWeapon || detectWeapon(asset);
+    const rtProfile = rt && rt.available ? weaponProfileFor(rt) : null;
+    this.weaponProfile = rtProfile ? rtProfile.id : null;
+    this.weapon = rt && rt.available
+      ? (this.weaponProfile || 'none')
+      : detectWeapon(asset);
     this.lastParticleEvent = null;
     this.lastEventEmit.clear();
     this.lastStateId = null;
     this.loopCount = 0;
     this.emittedCycles.clear();
+    this.lastModel = null;
     if (this.particles) this.particles.clear();
-    this.log('info', `攻击粒子武器识别: ${weaponLabel(this.weapon)}`);
+    if (this.weaponProfile) {
+      const sets = Array.isArray(rt.animSet) ? rt.animSet.join(',') : (rt.animSet || '—');
+      this.log('info', `攻击事件表: ${weaponLabel(this.weapon)}（animSet=${sets}）`);
+    } else if (rt && rt.available) {
+      const sets = Array.isArray(rt.animSet) ? rt.animSet.join(',') : (rt.animSet || '—');
+      this.log('info', `攻击事件表: 无（animSet=${sets} · group=${rt.comboGroup || '—'} 未命中 anim_events.weapons[*].animSets）`);
+    } else {
+      this.log('info', `攻击事件表: ${weaponLabel(this.weapon)}（旧 combos 布局：按部件名识别）`);
+    }
     const program = this.getMainProgram(asset.stats.maxPartBones);
 
     // G3DArmy stripUniformVertexColors：全网格同一值的顶点色（转换器哨兵值）直接剥离
@@ -925,16 +1112,69 @@ void main() {
     }
     // AI 放置：整个模型（含骨架/配件/粒子锚点）的外层变换
     let placement = null;
+    let placementScale = 1;
     if (view.placement) {
       placement = this.placementMatrix(view.placement);
+      // 摆放矩阵的缩放（非均匀取最大轴，与接触阴影口径一致）
+      placementScale = Math.max(
+        Math.hypot(placement[0], placement[1], placement[2]),
+        Math.hypot(placement[4], placement[5], placement[6]),
+        Math.hypot(placement[8], placement[9], placement[10]),
+      ) || 1;
       mat4Multiply(world, placement, world);
     }
     this.lastWorld.set(world);
 
-    // ---- 攻击粒子：按 EU5 animsm 的绝对时间事件触发 ----
-    const activeWeapon = view.particleWeapon && view.particleWeapon !== 'auto'
+    // ---- 摆放 / 缩放度量（属性面板 + AI API） ----
+    // 参考点（相对定位基准）都换算成场景绝对坐标：
+    //   center     = 当前姿势包围盒中心（默认）
+    //   feetCenter = 包围盒最下方一层的中心（模型“脚”的中心）
+    //   feet       = 模型原点（自动适配后脚底中心；G3DArmy 默认贴合地面）
+    const modelCenter = bbox
+      ? [
+        (bbox.min[0] + bbox.max[0]) * 0.5,
+        (bbox.min[1] + bbox.max[1]) * 0.5,
+        (bbox.min[2] + bbox.max[2]) * 0.5,
+      ]
+      : [0, 0, 0];
+    const modelFeetCenter = bbox
+      ? [
+        (bbox.min[0] + bbox.max[0]) * 0.5,
+        bbox.min[1],
+        (bbox.min[2] + bbox.max[2]) * 0.5,
+      ]
+      : [0, 0, 0];
+    const worldPoint = (p) => {
+      const out = [0, 0, 0];
+      mat4TransformPoint(out, world, p[0], p[1], p[2]);
+      return out;
+    };
+    const worldCenter = worldPoint(modelCenter);
+    const worldFeetCenter = worldPoint(modelFeetCenter);
+    const worldFeet = worldPoint([0, 0, 0]);
+    const totalScale = fitScale * placementScale;
+    this.lastModel = {
+      // 世界（场景绝对）坐标
+      center: worldCenter,
+      feetCenter: worldFeetCenter,
+      feet: worldFeet,
+      // 模型空间（world 之前）坐标：参考点切换/自定义时用
+      localCenter: modelCenter,
+      localFeetCenter: modelFeetCenter,
+      fitScale,
+      placementScale,
+      scale: totalScale,
+      size: bbox
+        ? [bbox.size[0] * totalScale, bbox.size[1] * totalScale, bbox.size[2] * totalScale]
+        : null,
+      placementPosition: view.placement ? [...(view.placement.position || [0, 0, 0])] : [0, 0, 0],
+    };
+
+    // ---- 攻击粒子：按 anim_events.json（G3DArmy v4.3+）的绝对时间事件触发 ----
+    const overrideWeapon = view.particleWeapon && view.particleWeapon !== 'auto'
       ? view.particleWeapon
-      : this.weapon;
+      : null;
+    const activeWeapon = overrideWeapon || this.weapon;
     if (this.particles && view.particles !== false && activeWeapon !== 'none') {
       const now = view.time || 0;
       const prev = view.prevTime != null ? view.prevTime : now;
@@ -949,7 +1189,7 @@ void main() {
         this.lastEventEmit.clear();
       }
       if (now < prev - 1e-6) this.loopCount += 1;
-      const events = eventListFor(asset, view.stateId, activeWeapon, duration);
+      const events = eventListFor(asset, view.stateId, overrideWeapon, duration, this.weapon);
       for (const ev of events) {
         const key = `${activeWeapon}:${ev.index}`;
         const cycleKey = `${key}:${this.loopCount}`;
@@ -961,10 +1201,11 @@ void main() {
         const near = !firstTick && !already && !hit && Math.abs(now - ev.t) < 0.25
           && (last == null || Math.abs(last - now) > 0.5);
         if (!hit && !near) continue;
-        const anchor = computeAttackAnchor(asset, world, activeWeapon);
+        const anchor = computeAttackAnchor(asset, world, ev.profile || activeWeapon, ev.place);
         if (!anchor) continue;
         this.particles.emit(ev.preset, anchor, {
-          atGrip: ev.preset === 'musket_ignite',
+          // G3DArmy：atGrip 或 place=vfx_loc_02 都挂到握把骨（Unit_Wea_Right_Hand01）。
+          atGrip: !!(ev.atGrip || ev.place === 'vfx_loc_02'),
           defs: ev.defs,
         });
         const preAge = near && !hit ? Math.max(0, now - ev.t) : 0;
@@ -973,6 +1214,8 @@ void main() {
         this.lastEventEmit.set(key, now);
         this.lastParticleEvent = {
           weapon: activeWeapon,
+          profile: ev.profile || null,
+          place: ev.place || null,
           preset: ev.preset,
           eventTime: ev.t,
           atTime: now,
@@ -996,6 +1239,33 @@ void main() {
     const tintStrength = view.tintStrength != null ? view.tintStrength : G3D_DEFAULTS.tintStrength;
     const skipTokens = G3D_DEFAULTS.tintSkip;
 
+    // ---- 选中描边：模型绕包围盒中心放大一圈、只画背面 + 纯色 ----
+    if (view.selected) {
+      const outlineWorld = this.outlineWorldMatrix(world, bbox, G3D_DEFAULTS.outlineScale);
+      gl.cullFace(gl.FRONT);
+      this.drawParts(program, outlineWorld, {
+        flat: true,
+        flatColor: G3D_DEFAULTS.outlineColor,
+      });
+      gl.cullFace(gl.BACK);
+    }
+
+    this.drawParts(program, world, { tintColor, tintStrength, skipTokens });
+    return this.finishFrame(asset, view, projView, world, bbox, fitScale, dx, dz, deg, placement, eye, target);
+  }
+
+  /** 把模型所有部件按给定 world 矩阵画一遍（本体 / 选中描边共用）。 */
+  drawParts(program, world, opts = {}) {
+    const gl = this.gl;
+    const tintColor = opts.tintColor || null;
+    const tintStrength = opts.tintStrength != null ? opts.tintStrength : 0;
+    const skipTokens = opts.skipTokens || [];
+    const flat = !!opts.flat;
+    gl.uniform1f(program.uniforms.flat, flat ? 1 : 0);
+    if (flat) {
+      const c = opts.flatColor || G3D_DEFAULTS.outlineColor;
+      gl.uniform4f(program.uniforms.flatColor, c[0], c[1], c[2], c[3] == null ? 1 : c[3]);
+    }
     for (const gp of this.gpu.parts) {
       const part = gp.part;
       // ModelInstance：静态部件 world = instance * node.global；蒙皮部件只用 instance
@@ -1057,6 +1327,22 @@ void main() {
       this.drawStats.calls++;
       this.drawStats.triangles += gp.indexCount / 3;
     }
+  }
+
+  /** 绕模型包围盒中心放大 scale 倍（模型空间），用于选中描边外扩。 */
+  outlineWorldMatrix(world, bbox, scale = G3D_DEFAULTS.outlineScale) {
+    const c = bbox
+      ? [(bbox.min[0] + bbox.max[0]) * 0.5, (bbox.min[1] + bbox.max[1]) * 0.5, (bbox.min[2] + bbox.max[2]) * 0.5]
+      : [0, 0, 0];
+    // local = T(c) * S(scale) * T(-c)
+    const toOrigin = mat4Multiply(mat4Identity(), mat4Translation(c[0], c[1], c[2]), mat4Scaling(scale, scale, scale));
+    const local = mat4Multiply(mat4Identity(), toOrigin, mat4Translation(-c[0], -c[1], -c[2]));
+    return mat4Multiply(mat4Identity(), world, local);
+  }
+
+  /** 本体画完后的阴影 / 骨架 / 参考点 / 粒子。 */
+  finishFrame(asset, view, projView, world, bbox, fitScale, dx, dz, deg, placement, eye, target) {
+    const gl = this.gl;
 
     // ---- 接触阴影（G3DArmy renderAll） ----
     if (view.shadow && bbox) {
@@ -1066,6 +1352,13 @@ void main() {
     // ---- 骨架线框 / 高亮 ----
     if (view.skeleton) {
       this.drawSkeleton(projView, world, view);
+    }
+
+    // ---- 参考点高亮（黑白小球，画在最上层） ----
+    if (view.refLocal) {
+      const refPoint = [0, 0, 0];
+      mat4TransformPoint(refPoint, world, view.refLocal[0], view.refLocal[1], view.refLocal[2]);
+      this.drawRefMarker(projView, refPoint, view.refMarkerPx || G3D_DEFAULTS.refMarkerPx);
     }
 
     // ---- 攻击粒子（最后画，保证在模型/阴影之上） ----
@@ -1126,7 +1419,7 @@ void main() {
     const worldWidth = Math.max(bbox.size[0], bbox.size[2]) * fitScale * placementScale;
     let ss = worldWidth / 1.24;
     ss = ss < 0.75 ? 0.75 : (ss > 2.6 ? 2.6 : ss);
-    ss *= G3D_DEFAULTS.shadowScale;
+    ss *= this.shadowScale != null ? this.shadowScale : G3D_DEFAULTS.shadowScale;
 
     // 阴影 quad（-0.62..0.62；双面）
     const r = 0.62;
@@ -1159,8 +1452,14 @@ void main() {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this.drawStats.calls++;
     };
-    drawOne(ss, 0.012, 0.75);
-    drawOne(ss * G3D_DEFAULTS.shadowCore, 0.006, 1.0);
+    // 烘焙模式（v4.9.2 默认）：核心已在贴图里 → 只画一层、opacity 1；
+    // shadowBake=false 时回到旧的双层（0.75 主阴影 + 0.6 核心）。
+    if (this.shadowBake) {
+      drawOne(ss, 0.012, 1.0);
+    } else {
+      drawOne(ss, 0.012, 0.75);
+      drawOne(ss * (this.shadowCore || G3D_DEFAULTS.shadowCore), 0.006, 1.0);
+    }
     gl.enable(gl.CULL_FACE);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
@@ -1246,6 +1545,12 @@ void main() {
     if (this.particles) this.particles.dispose();
     gl.deleteProgram(this.lineProgram.prog);
     gl.deleteProgram(this.shadowProgram.prog);
+    if (this.refMarker) {
+      gl.deleteProgram(this.refMarker.prog);
+      if (this.refMarker.buf) gl.deleteBuffer(this.refMarker.buf);
+      if (this.refMarker.tex) gl.deleteTexture(this.refMarker.tex);
+      this.refMarker = null;
+    }
   }
 }
 

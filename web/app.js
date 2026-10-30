@@ -10,6 +10,8 @@ import {
   pickRuntimeRule as pickRuntimeRuleV47,
   runtimeRuleKeys as runtimeRuleKeysV47,
   runtimeGroupOptions as runtimeGroupOptionsV47,
+  weaponFamilyFromSig,
+  animSetList,
 } from './runtime_rules.js';
 import { initLayoutDrawers } from './layout_drawers.js';
 
@@ -76,6 +78,22 @@ const el = {
   fitpct: $('#fitpct'),
   fitpctVal: $('#fitpct-val'),
   fitmax: $('#chk-fitmax'),
+  transformStats: $('#transform-stats'),
+  transformBadge: $('#transform-badge'),
+  transformRef: $('#transform-ref'),
+  transformCustomRow: $('#transform-custom-row'),
+  transformRefX: $('#transform-ref-x'),
+  transformRefY: $('#transform-ref-y'),
+  transformRefZ: $('#transform-ref-z'),
+  transformRefApply: $('#btn-transform-ref-apply'),
+  transformCx: $('#transform-cx'),
+  transformCy: $('#transform-cy'),
+  transformCz: $('#transform-cz'),
+  transformScale: $('#transform-scale'),
+  transformReset: $('#btn-transform-reset'),
+  undoBtn: $('#btn-undo'),
+  redoBtn: $('#btn-redo'),
+  refMarker: $('#chk-ref-marker'),
   worldh: $('#worldh'),
   tintMode: $('#tint-mode'),
   tintColor: $('#tint-color'),
@@ -228,6 +246,14 @@ const app = {
   runtimeSelection: null,
   particles: true,
   particleWeapon: 'auto',
+  // 摆放面板的相对定位基准：'center'（包围盒中心）| 'feetCenter'（脚底中心）| 'custom'（脱绑自定义）
+  transformRef: 'center',
+  // 自定义参考点在**模型空间**的局部坐标（脱绑 bbox：只由用户设定，之后随模型一起动）
+  transformCustomLocal: null,
+  // 参考点高亮（默认关闭）
+  refMarker: false,
+  // 3D 视图选中模型（悬停/点击高亮轮廓，选中后可拖动摆放）
+  selected: false,
   dt: 0,
   prevTimes: { idle: 0, move: 0, battle: 0, retreat: 0 },
   eu5sm: false,
@@ -434,8 +460,8 @@ async function fetchJsonFile(path) {
   return await res.json();
 }
 
-// ---------------------------------------------------------------- G3DArmy v4.7 规则
-// 选型/挂件解析逻辑已移到 runtime_rules.js（与 G3DArmyPlugin v4.7.0 同步）：
+// ---------------------------------------------------------------- G3DArmy v4.9 规则
+// 选型/挂件解析逻辑已移到 runtime_rules.js（与 G3DArmyPlugin v4.9.14 同步，选择语义同 v4.7.0）：
 //   unitSelect 宗教块数组 + unitgroup 文化组兜底 + civilization 顶层 unitSelect/shipSelect。
 
 function isObject(value) {
@@ -448,21 +474,9 @@ function isShipModel(model) {
   return category === 'ship' || name.startsWith('ship_');
 }
 
-/** G3DArmy v4.4 weaponFamilyFromSig 的 JS 版：按挂件签名判定武器族。 */
-function weaponFamilyFromSig(sig) {
-  if (!sig) return null;
-  const s = String(sig).toLowerCase();
-  if (s.includes('crossbow')) return 'crossbow';
-  if (['musket', 'flintlock', 'matchlock', 'arquebus', 'handgonne', 'handgonna', 'pistol'].some((x) => s.includes(x))) return 'musket';
-  if (s.includes('bow')) return 'bow';
-  if (['spear', 'pike', 'lance', 'halberd'].some((x) => s.includes(x))) return 'spear';
-  if (['sword', 'blade', 'saber', 'rapier', 'axe', 'mace', 'knife', 'katar'].some((x) => s.includes(x))) return 'sword';
-  return null;
-}
-
 /**
  * G3DArmy v4.4：武器决定动画。
- * 若 mounted 武器族与 combo 自身 animSet 不同，读取 models/assembly.json 的 animDonors，
+ * 若武器族与 combo 自身 animSet 不同，读取 models/assembly.json 的 animDonors，
  * 把 donor 的动画轨道按 boneId 重绑到目标模型（只取动画，不建 donor 网格）。
  */
 async function applyRuntimeAnimDonor(json, runtime, mounted, path) {
@@ -473,9 +487,11 @@ async function applyRuntimeAnimDonor(json, runtime, mounted, path) {
   const signature = mounted.map((m) => m.part).join(';');
   const family = weaponFamilyFromSig(signature);
   if (!family) return null;
-  const own = String(combo.animSet || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const own = animSetList(combo.animSet);
   if (own.includes(family)) return null;
-  const rig = combo.rig || 'foot';
+  // 与插件一致：rig 缺省时取 rigs[0]；两者都没有 = 不借动画（不默认 foot）。
+  const rig = combo.rig || (Array.isArray(combo.rigs) ? combo.rigs[0] : null);
+  if (!rig) return null;
   const donor = runtime.assembly.animDonors?.[rig]?.[family];
   if (!donor || donor === comboId) return null;
   const donorPath = `${runtime.info.main}/${donor}.g3dj`;
@@ -695,9 +711,20 @@ async function loadRuntimeData(path) {
     animEvents = null;
   }
   const combo = nameOf(path);
-  const animSet = assembly && assembly.combos && assembly.combos[combo]
-    ? assembly.combos[combo].animSet || null
+  const comboDef = assembly && assembly.combos && assembly.combos[combo]
+    ? assembly.combos[combo]
     : null;
+  // animSet 可能是字符串或数组（如 ["musket_r", "horse"]）；攻击事件按列表逐个查。
+  const animSet = comboDef ? (comboDef.animSet ?? null) : null;
+  const comboGroup = comboDef ? (comboDef.group ?? null) : null;
+  // v4.2+: setting.json（渲染窗口/适配/染色；g3d-web 只用其中与模型外观相关的键）。
+  let setting = null;
+  const settingPath = info.base ? `${info.base}/setting.json` : 'setting.json';
+  try {
+    setting = await fetchJsonFile(settingPath);
+  } catch (e) {
+    setting = null;
+  }
   // v4.5: civilization/<tag>.json；文件不存在时忽略，不影响全局规则。
   const civs = {};
   for (const [tag, civPath] of Object.entries(info.civs || {})) {
@@ -707,7 +734,10 @@ async function loadRuntimeData(path) {
       // 单个文明覆盖损坏不应阻断整个 runtime
     }
   }
-  return { info, available: true, attachments, unitSelect, override, civs, index, assembly, animEvents, animSet, partCache: new Map() };
+  return {
+    info, available: true, attachments, unitSelect, override, civs, index, assembly,
+    animEvents, animSet, comboGroup, setting, partCache: new Map(),
+  };
 }
 
 function normalizeRuntimeToken(token) {
@@ -786,6 +816,10 @@ async function mergeRuntimeIntoJson(json, path, runtime) {
     ship: !!picked?.ship,
     tokens,
     mounted,
+    // 与插件一致：挂件签名（"件名@骨;…"）+ combo 的 animSet/group 决定攻击事件表。
+    attachSig: mounted.map((m) => (m.bone ? `${m.part}@${m.bone}` : m.part)).join(';'),
+    animSet: runtime.animSet ?? null,
+    comboGroup: runtime.comboGroup ?? null,
     stripped,
     warnings,
   };
@@ -876,6 +910,8 @@ function updateRuntimeUI() {
 
   const count = info.mounted?.length || 0;
   el.runtimeBadge.textContent = count ? `已挂载 ${count}` : '无挂载';
+  const animSets = animSetList(info.animSet);
+  const prof = renderer ? renderer.weaponProfile : null;
   const parts = [
     info.ruleKey || '—',
     info.civ ? `civ:${info.civ}` : 'global',
@@ -884,6 +920,8 @@ function updateRuntimeUI() {
     info.aId != null ? `aID:${info.aId}` : '',
     info.religion ? `rel:${info.religion}` : '',
     info.religionGroup != null ? `relg:${info.religionGroup}` : '',
+    animSets.length ? `animSet:${animSets.join(',')}` : '',
+    `攻击表:${prof || '无'}`,
   ].filter(Boolean).join(' / ');
   if (count) {
     el.runtimeNote.textContent = `${parts}（${info.pickReason || 'auto'}）：${info.mounted.map((m) => `${m.part}@${m.bone}`).join(', ')}`;
@@ -977,6 +1015,32 @@ async function selectModel(path, force = false) {
 
     el.empty.classList.add('hidden');
     el.err.classList.add('hidden');
+    // v4.2+: setting.json 的适配设置（与游戏一致）；缺键时保留上面的长模型自动判定。
+    const setting = runtime && runtime.available ? runtime.setting : null;
+    let settingNote = null;
+    if (setting) {
+      const pct = Number(setting.modelFitPct);
+      if (Number.isFinite(pct) && pct > 0) {
+        app.fitPct = Math.max(0.1, Math.min(1.2, pct));
+        el.fitpct.value = String(app.fitPct);
+        el.fitpctVal.textContent = app.fitPct.toFixed(2);
+      }
+      if (setting.modelFitBy === 'max' || setting.modelFitBy === 'height') {
+        app.fitByMax = setting.modelFitBy === 'max';
+        el.fitmax.checked = app.fitByMax;
+      }
+      // v4.9.2：阴影三项（含核心烘焙）
+      if (renderer) {
+        renderer.setShadowStyle({
+          scale: setting.shadowScale,
+          core: setting.shadowCore,
+          bake: setting.shadowBake,
+        });
+      }
+      settingNote = `setting.json：modelFitPct=${setting.modelFitPct ?? '—'} · modelFitBy=${setting.modelFitBy ?? '—'}`
+        + ` · modelYaw=${setting.modelYaw ?? '—'} · tint=${setting.tint ?? '—'}/${setting.tintStrength ?? '—'}`
+        + ` · shadowBake=${setting.shadowBake ?? '—'} · nearFar=${setting.nearFar ?? '—'}`;
+    }
     el.title.textContent = asset.id || asset.fileName;
     el.path.textContent = shortPath(path, 70);
     el.path.title = path;
@@ -988,9 +1052,14 @@ async function selectModel(path, force = false) {
     updateStats();
     updateHud(true);
     updateRuntimeUI();
+    // 换模型后旧的选中态已经没有意义（轮廓高亮跟着上一个模型走）。
+    setSelected(false, { silent: true });
+    // 撤销栈是模型相关（自定义参考点存的是模型空间坐标），换模型就清空。
+    clearHistory();
 
     separator(`加载 ${asset.fileName}`);
     log('ok', `模型加载完成 ${tParse.toFixed(0)}ms：顶点 ${fmt(asset.stats.vertices)} · 三角 ${fmt(asset.stats.triangles)} · 部件 ${asset.stats.parts} · 骨骼节点 ${asset.stats.joints}/${asset.stats.nodes} · 单部件最多 ${asset.stats.maxPartBones} 骨 · 动画 ${asset.animations.length}`);
+    if (settingNote) log('info', settingNote);
     if (runtimeInfo) {
       if (!runtimeInfo.available) {
         log('info', 'G3DArmy: 当前模型没有找到装配配置');
@@ -1342,6 +1411,9 @@ function buildView() {
     skeletonBones: app.skeletonBones,
     skeletonBadBones: app.skeletonBadBones || [],
     placement: app.placement,
+    selected: !!app.selected,
+    // 参考点高亮：传模型空间的参考点，renderer 用本帧 world 变换成场景坐标画黑白小球
+    refLocal: app.refMarker ? currentRefLocal() : null,
     white: app.white,
     clampTrackEnd: app.clampTrackEnd,
     animT: app.proceduralT,
@@ -1360,6 +1432,7 @@ function updateStats() {
     el.checkBadge.textContent = '—';
     el.checkBadge.className = 'badge';
     el.warnList.innerHTML = '';
+    updateTransformPanel({ blur: true });
     return;
   }
   const a = app.asset;
@@ -1400,6 +1473,241 @@ function updateStats() {
     d.textContent = it.text;
     el.warnList.appendChild(d);
   }
+  updateTransformPanel({ blur: true });
+}
+
+/**
+ * 摆放面板的参考点（相对定位基准）：
+ *   center     包围盒中心（bbox 推导）
+ *   feetCenter 脚底中心 = 包围盒最下方一层的中心（bbox 推导）
+ *   custom     自定义：与模型几何**脱绑**，局部坐标由用户设定（默认沿用切换前的点），
+ *              之后只随模型整体移动/旋转/缩放，不再跟着动画包围盒漂移。
+ * `local` 是模型空间坐标；`get()` 返回场景绝对坐标。
+ */
+const TRANSFORM_REFS = {
+  center: { label: '包围盒中心', local: (m) => m.localCenter || [0, 0, 0], get: (m) => m.center },
+  feetCenter: { label: '脚底中心', local: (m) => m.localFeetCenter || [0, 0, 0], get: (m) => m.feetCenter || m.center },
+  custom: { label: '自定义', local: () => app.transformCustomLocal || [0, 0, 0], get: (m) => customRefPoint(m) },
+};
+
+/** 自定义参考点（模型空间局部坐标 → 场景绝对坐标）。 */
+function customRefPoint(m = renderer && renderer.lastModel) {
+  if (!m || !renderer || !renderer.lastWorld) return null;
+  const local = app.transformCustomLocal || [0, 0, 0];
+  const out = [0, 0, 0];
+  mat4TransformPoint(out, renderer.lastWorld, local[0], local[1], local[2]);
+  return out;
+}
+
+function transformRefKey() {
+  return TRANSFORM_REFS[app.transformRef] ? app.transformRef : 'center';
+}
+
+/** 当前参考点的场景绝对坐标（模型姿势变化时自动重算）。 */
+function transformRefPoint(m = renderer && renderer.lastModel) {
+  if (!m) return null;
+  return TRANSFORM_REFS[transformRefKey()].get(m);
+}
+
+/** 当前参考点在模型空间的局部坐标（参考点高亮小球用；custom 未设定时返回 null）。 */
+function currentRefLocal(m = renderer && renderer.lastModel) {
+  if (!m) return null;
+  if (transformRefKey() === 'custom') {
+    return app.transformCustomLocal ? [...app.transformCustomLocal] : null;
+  }
+  return [...TRANSFORM_REFS[transformRefKey()].local(m)];
+}
+
+/**
+ * 摆放 / 缩放面板（属性页）。改的是**模型本身**的变换，不是相机：
+ *   参考点   = 下拉选的相对定位基准（包围盒中心 / 脚底中心），显示其世界坐标（场景绝对坐标）；
+ *   缩放     = 自动适配(fitScale) × 摆放缩放(placement.scale)。
+ * 编辑参考点 = 平移 placement.position，让该参考点落到输入值；
+ * 编辑缩放   = 等比乘 placement.scale 让「总缩放」等于输入值。
+ */
+function updateTransformPanel(opts = {}) {
+  if (!el.transformStats) return;
+  const m = renderer && renderer.lastModel;
+  const fields = [el.transformCx, el.transformCy, el.transformCz, el.transformScale];
+  // 结构化改动（切换参考点 / 复位 / 应用 / 换模型）时先让输入框失焦，否则旧焦点会挡住新值。
+  if (opts.blur && fields.includes(document.activeElement)) document.activeElement.blur();
+  const active = document.activeElement;
+  const setInput = (node, value) => {
+    if (!node || node === active) return; // 正在输入时不覆盖
+    node.value = value;
+  };
+  const fmt3 = (v) => (Math.abs(v) < 5e-4 ? '0.000' : v.toFixed(3));
+  if (el.transformRef && el.transformRef.value !== transformRefKey()) {
+    el.transformRef.value = transformRefKey();
+  }
+  if (!app.asset || !m) {
+    el.transformStats.innerHTML = '<div class="k">参考点</div><div class="v">—</div>'
+      + '<div class="k">缩放</div><div class="v">—</div>';
+    setInput(el.transformCx, '');
+    setInput(el.transformCy, '');
+    setInput(el.transformCz, '');
+    setInput(el.transformScale, '');
+    return;
+  }
+  const ref = transformRefPoint(m);
+  setInput(el.transformCx, fmt3(ref[0]));
+  setInput(el.transformCy, fmt3(ref[1]));
+  setInput(el.transformCz, fmt3(ref[2]));
+  setInput(el.transformScale, m.scale.toPrecision(4));
+  // 自定义参考点的坐标输入就在下拉同一行；只在「自定义」时出现。
+  const isCustom = transformRefKey() === 'custom';
+  if (el.transformCustomRow) el.transformCustomRow.hidden = !isCustom;
+  if (isCustom) {
+    setInput(el.transformRefX, fmt3(ref[0]));
+    setInput(el.transformRefY, fmt3(ref[1]));
+    setInput(el.transformRefZ, fmt3(ref[2]));
+  }
+  const size = m.size || [0, 0, 0];
+  const customLocal = app.transformCustomLocal;
+  const rows = [
+    ['参考点', TRANSFORM_REFS[transformRefKey()].label],
+    ...(isCustom && customLocal
+      ? [['参考点局部坐标', customLocal.map(fmt3).join(', ')]]
+      : []),
+    ['包围盒中心', m.center.map(fmt3).join(', ')],
+    ['脚底中心', (m.feetCenter || m.center).map(fmt3).join(', ')],
+    ['总缩放', `×${m.scale.toPrecision(4)}`],
+    ['自动适配 × 摆放', `×${m.fitScale.toPrecision(4)} · ×${m.placementScale.toPrecision(4)}`],
+    ['尺寸（场景单位）', size.map((v) => v.toFixed(2)).join(' × ')],
+    ['摆放偏移 position', app.placement.position.map(fmt3).join(', ')],
+  ];
+  el.transformStats.innerHTML = rows
+    .map(([k, v]) => `<div class="k">${k}</div><div class="v mono">${v}</div>`)
+    .join('');
+  if (el.transformBadge) {
+    const d = PLACEMENT_DEFAULTS;
+    const moved = app.placement.position.some((v, i) => Math.abs(v - d.position[i]) > 1e-6)
+      || app.placement.scale.some((v, i) => Math.abs(v - d.scale[i]) > 1e-6)
+      || app.placement.rotation.some((v, i) => Math.abs(v - d.rotation[i]) > 1e-6)
+      || !!app.placement.matrix;
+    el.transformBadge.textContent = moved ? '已改模型' : (isCustom ? '自定义参考点' : 'G3DArmy 默认');
+    el.transformBadge.className = 'badge ' + (moved ? 'warn' : '');
+  }
+}
+
+/**
+ * 把参考点平移到给定场景绝对坐标（改模型，不是镜头）：
+ * 参考点与模型刚性绑定（局部偏移固定），所以平移 placement.position 即可让参考点跟随输入值。
+ */
+function translateRefTo(want) {
+  const m = renderer && renderer.lastModel;
+  const curRef = transformRefPoint(m);
+  if (!app.asset || !m || !curRef) return false;
+  if (want.some((v) => !Number.isFinite(v))) return false;
+  if (want.every((v, i) => Math.abs(v - curRef[i]) < 5e-4)) return false;
+  const cur = clonePlacement(app.placement);
+  const delta = want.map((v, i) => v - curRef[i]);
+  setModelPlacement({
+    ...cur,
+    position: cur.position.map((v, i) => v + delta[i]),
+    matrix: null,
+  });
+  return { delta, want };
+}
+
+/** 把当前参考点平移到输入的场景绝对坐标（改模型，不是镜头）。 */
+function applyTransformRef() {
+  const want = [el.transformCx, el.transformCy, el.transformCz].map((n) => Number(n?.value));
+  const moved = translateRefTo(want);
+  if (!moved) return;
+  log('info', `${TRANSFORM_REFS[transformRefKey()].label} → [${moved.want.map((v) => v.toFixed(3)).join(', ')}]`
+    + `（平移 ${moved.delta.map((v) => (v >= 0 ? '+' : '') + v.toFixed(3)).join(', ')}，改的是模型本身）`);
+  updateTransformPanel({ blur: true });
+}
+
+/** 下拉里「自定义」那一行：把输入的场景坐标设为参考点并移动模型。 */
+function applyCustomRefPoint() {
+  const want = [el.transformRefX, el.transformRefY, el.transformRefZ].map((n) => Number(n?.value));
+  if (want.some((v) => !Number.isFinite(v))) {
+    log('warn', '自定义参考点需要完整的 x / y / z 场景坐标');
+    return;
+  }
+  if (transformRefKey() !== 'custom') setTransformRef('custom');
+  const moved = translateRefTo(want);
+  if (moved) {
+    log('info', `自定义参考点 → [${want.map((v) => v.toFixed(3)).join(', ')}]`
+      + `（平移 ${moved.delta.map((v) => (v >= 0 ? '+' : '') + v.toFixed(3)).join(', ')}，改的是模型本身）`);
+  }
+  updateTransformPanel({ blur: true });
+}
+
+/**
+ * 切换参考点预设。center / feetCenter 只换基准（不改模型）；
+ * custom 与模型几何脱绑：立刻把当前参考点的**局部坐标**冻结下来当自定义点（模型不动），
+ * 之后这个点只随模型整体移动/旋转/缩放，不再跟随动画包围盒漂移。
+ */
+function setTransformRef(key) {
+  const m = renderer && renderer.lastModel;
+  const next = TRANSFORM_REFS[key] ? key : 'center';
+  if (next !== transformRefKey()) beginEdit('切换参考点');
+  if (next === 'custom' && m && !app.transformCustomLocal) {
+    const from = TRANSFORM_REFS[transformRefKey()].local(m);
+    app.transformCustomLocal = [from[0], from[1], from[2]];
+  }
+  app.transformRef = next;
+  if (el.transformRef) el.transformRef.value = next;
+  updateTransformPanel({ blur: true });
+  const p = transformRefPoint(m);
+  if (p) {
+    const localNote = next === 'custom' && app.transformCustomLocal
+      ? `局部 [${app.transformCustomLocal.map((v) => v.toFixed(3)).join(', ')}] → `
+      : '';
+    log('info', `摆放参考点 = ${TRANSFORM_REFS[next].label}（${localNote}场景绝对坐标 [${p.map((v) => v.toFixed(3)).join(', ')}]）`);
+  }
+}
+
+/** 直接设定自定义参考点的局部坐标（API 用；会移动模型让该点落在原场景位置之外）。 */
+function setCustomRefLocal(local) {
+  const v = cloneVec3(local, [0, 0, 0]);
+  beginEdit('自定义参考点');
+  app.transformCustomLocal = v;
+  app.transformRef = 'custom';
+  if (el.transformRef) el.transformRef.value = 'custom';
+  updateTransformPanel({ blur: true });
+  return getModelMetrics();
+}
+
+/** 把「总缩放」改成输入值（等比乘 placement.scale，改的是模型本身）。 */
+function applyTransformScale() {
+  const m = renderer && renderer.lastModel;
+  const want = Number(el.transformScale?.value);
+  if (!app.asset || !m || !(want > 0) || !(m.scale > 0)) return;
+  const k = want / m.scale;
+  // 面板显示只有 4 位有效数字：差在显示精度内就当作没改，避免 focus/blur 抖动。
+  if (Math.abs(k - 1) < 1e-3) return;
+  scaleModel(k);
+  log('info', `模型缩放 ×${want.toPrecision(4)}（自动适配 ×${m.fitScale.toPrecision(4)} × 摆放 ×${(m.placementScale * k).toPrecision(4)}；围绕脚底缩放）`);
+  updateTransformPanel({ blur: true });
+}
+
+/** 参考点 / 缩放的 API 版（供 AI 脚本读取，和面板同口径）。 */
+function getModelMetrics() {
+  const m = renderer && renderer.lastModel;
+  if (!m) return null;
+  const refKey = transformRefKey();
+  return {
+    schema: 'g3d-web-model-metrics/1',
+    ref: refKey,
+    refPoint: r3v(TRANSFORM_REFS[refKey].get(m)),
+    refLocal: refKey === 'custom'
+      ? (app.transformCustomLocal ? r3v(app.transformCustomLocal) : null)
+      : r3v(TRANSFORM_REFS[refKey].local(m)),
+    center: r3v(m.center),
+    feetCenter: r3v(m.feetCenter || m.center),
+    feet: r3v(m.feet),
+    scale: r3(m.scale),
+    fitScale: r3(m.fitScale),
+    placementScale: r3(m.placementScale),
+    size: m.size ? r3v(m.size) : null,
+    placement: clonePlacement(app.placement),
+    marker: !!app.refMarker,
+    units: 'scene (worldH=视口世界高度)',
+  };
 }
 
 function report() {
@@ -2682,6 +2990,8 @@ function diagnose(options = {}) {
     view: { ...buildView(), animId: anim ? anim.id : null },
     frame,
     fit: fitInfo(),
+    // 模型中心（场景绝对坐标）/ 最终缩放：与属性页「摆放 / 缩放」同口径
+    modelMetrics: getModelMetrics(),
     camera: renderer ? renderer.lastCamera : null,
     renderer: renderer ? {
       webgl: renderer.isWebGL2 ? 'webgl2' : 'webgl',
@@ -2938,12 +3248,15 @@ function getPlacement() {
     matrix: renderer?.lastWorld ? Array.from(renderer.lastWorld) : null,
     units: 'scene (auto-fit; feet center at origin)',
     rotationOrder: 'XYZ (degrees)',
+    // 当前姿势下的模型中心 / 缩放（与属性面板同口径）：中心是场景绝对坐标
+    metrics: getModelMetrics(),
   };
 }
 
 function setModelPlacement(opts = {}) {
   const reset = !!opts.reset;
   const src = isObject(opts.placement) ? opts.placement : opts;
+  beginEdit('摆放 / 缩放');
   const base = reset ? PLACEMENT_DEFAULTS : app.placement;
   const next = {
     ...base,
@@ -3003,8 +3316,14 @@ function scaleModel(value = 1) {
 }
 
 function resetModelPlacement() {
+  beginEdit('复位摆放 / 缩放');
   app.placement = clonePlacement(PLACEMENT_DEFAULTS);
+  // 复位同时清掉自定义参考点，回到「包围盒中心」基准
+  app.transformCustomLocal = null;
+  app.transformRef = 'center';
+  if (el.transformRef) el.transformRef.value = 'center';
   renderPlacedModel();
+  updateTransformPanel({ blur: true });
   return getPlacement();
 }
 
@@ -3012,6 +3331,7 @@ function setModelMatrix(matrix) {
   if (!Array.isArray(matrix) || matrix.length !== 16) {
     throw new Error('setModelMatrix 需要 16 个数的列主序矩阵');
   }
+  beginEdit('设置模型矩阵');
   const cur = clonePlacement(app.placement);
   cur.matrix = matrix.slice(0, 16);
   app.placement = cur;
@@ -3198,6 +3518,7 @@ function updateHud(force = false) {
   const now = performance.now();
   if (!force && now - lastHud < 100) return;
   lastHud = now;
+  updateTransformPanel();
   if (!app.asset) {
     el.hudAnim.textContent = '—';
     el.hudTime.textContent = '—';
@@ -3225,7 +3546,7 @@ function updateHud(force = false) {
       ? (renderer ? renderer.weapon : '—')
       : app.particleWeapon;
     const last = renderer && renderer.lastParticleEvent;
-    el.particleNote.textContent = `武器: ${weapon} · 粒子: ${particleCount}`
+    el.particleNote.textContent = `事件表: ${weapon} · 粒子: ${particleCount}`
       + (last ? ` · 最近: ${last.preset} @ ${last.atTime.toFixed(2)}s` : '');
   }
   if (el.vfxBadge) el.vfxBadge.textContent = app.particles ? '开' : '关';
@@ -3238,6 +3559,402 @@ function updateHud(force = false) {
     }
   }
   updateScrub();
+}
+
+// ---------------------------------------------------------------- 撤销 / 重做（上一步 / 下一步）
+
+const HISTORY_LIMIT = 100;
+const HISTORY_COALESCE_MS = 900;
+// undo/redo 里存的是「改动前」的界面状态；同一次连续操作（拖滑块 / 拖模型 / 滚轮）只压一条。
+const history = { undo: [], redo: [], key: null, time: 0, suspended: 0 };
+
+/** 可回退的界面状态：摆放 / 缩放、参考点、视角（缩放 / 方位 / 俯仰 / 朝向）。 */
+function editSnapshot() {
+  return {
+    placement: clonePlacement(app.placement),
+    transformRef: app.transformRef,
+    transformCustomLocal: app.transformCustomLocal ? [...app.transformCustomLocal] : null,
+    zoom: app.zoom,
+    azimuth: app.azimuth,
+    elevation: app.elevation,
+    facing: app.facing,
+  };
+}
+
+function snapshotSig(s) {
+  return JSON.stringify(s);
+}
+
+function updateHistoryUI() {
+  const last = history.undo[history.undo.length - 1];
+  const next = history.redo[history.redo.length - 1];
+  if (el.undoBtn) {
+    el.undoBtn.disabled = !last;
+    el.undoBtn.title = last ? `撤销「${last.label}」（Ctrl+Z）` : '没有可撤销的操作（Ctrl+Z）';
+  }
+  if (el.redoBtn) {
+    el.redoBtn.disabled = !next;
+    el.redoBtn.title = next ? `重做「${next.label}」（Ctrl+Shift+Z / Ctrl+Y）` : '没有可重做的操作';
+  }
+}
+
+/**
+ * 记录一次改动的**前**状态。key 相同且在 HISTORY_COALESCE_MS 内视为同一次连续操作，不再重复记录。
+ */
+function beginEdit(label, key = null) {
+  if (history.suspended) return;
+  const now = performance.now();
+  if (key && key === history.key && now - history.time < HISTORY_COALESCE_MS) {
+    history.time = now;
+    return;
+  }
+  history.key = key;
+  history.time = now;
+  const snap = editSnapshot();
+  const top = history.undo[history.undo.length - 1];
+  if (top && snapshotSig(top.state) === snapshotSig(snap)) return;
+  history.undo.push({ label, state: snap });
+  if (history.undo.length > HISTORY_LIMIT) history.undo.shift();
+  history.redo.length = 0;
+  updateHistoryUI();
+}
+
+/** 连续交互（拖动模型 / 中键环绕）：整段只产生一条记录。 */
+function beginGroupEdit(label) {
+  beginEdit(label);
+  history.suspended++;
+}
+
+function endGroupEdit() {
+  if (history.suspended > 0) history.suspended--;
+  history.key = null;
+}
+
+function applyHistory(state) {
+  history.suspended++;
+  try {
+    app.placement = clonePlacement(state.placement);
+    app.transformRef = TRANSFORM_REFS[state.transformRef] ? state.transformRef : 'center';
+    app.transformCustomLocal = state.transformCustomLocal ? [...state.transformCustomLocal] : null;
+    app.facing = state.facing;
+    if (el.facing) el.facing.value = String(app.facing);
+    if (el.facingVal) el.facingVal.textContent = `${app.facing}°`;
+    if (el.transformRef) el.transformRef.value = app.transformRef;
+    setZoom(state.zoom);
+    setAzimuth(state.azimuth);
+    setElevation(state.elevation);
+    renderPlacedModel();
+    updateTransformPanel({ blur: true });
+  } finally {
+    history.suspended--;
+  }
+  updateHistoryUI();
+}
+
+function undoEdit() {
+  const entry = history.undo.pop();
+  if (!entry) {
+    log('info', '没有可撤销的操作');
+    updateHistoryUI();
+    return false;
+  }
+  history.redo.push({ label: entry.label, state: editSnapshot() });
+  applyHistory(entry.state);
+  history.key = null;
+  log('info', `↶ 撤销「${entry.label}」（可撤销 ${history.undo.length} 步 / 可重做 ${history.redo.length} 步）`);
+  return true;
+}
+
+function redoEdit() {
+  const entry = history.redo.pop();
+  if (!entry) {
+    log('info', '没有可重做的操作');
+    updateHistoryUI();
+    return false;
+  }
+  history.undo.push({ label: entry.label, state: editSnapshot() });
+  applyHistory(entry.state);
+  history.key = null;
+  log('info', `↷ 重做「${entry.label}」（可撤销 ${history.undo.length} 步 / 可重做 ${history.redo.length} 步）`);
+  return true;
+}
+
+function clearHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+  history.key = null;
+  history.suspended = 0;
+  updateHistoryUI();
+}
+
+// ---------------------------------------------------------------- 3D 视图交互（鼠标捕获）
+
+// 相机参数（环绕方位 / 俯角 / 缩放）统一走 setter，保证滑块与标签同步。
+const ZOOM_RANGE = [0.4, 2.5];
+const AZIMUTH_RANGE = [-180, 180];
+const ELEVATION_RANGE = [-85, 85];
+// 中键拖动灵敏度（度 / 像素）
+const ORBIT_DEG_PER_PX = 0.6;
+
+function setZoom(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return app.zoom;
+  // 与滑块 step=0.01 对齐，避免滚轮缩放后滑块与实际值差一点点
+  const next = Math.round(Math.min(ZOOM_RANGE[1], Math.max(ZOOM_RANGE[0], n)) * 100) / 100;
+  if (next !== app.zoom) beginEdit('相机缩放', 'camera');
+  app.zoom = next;
+  if (el.zoom) el.zoom.value = app.zoom.toFixed(2);
+  if (el.zoomVal) el.zoomVal.textContent = app.zoom.toFixed(2) + '×';
+  return app.zoom;
+}
+
+function setAzimuth(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return app.azimuth;
+  let a = ((n + 180) % 360 + 360) % 360 - 180;
+  const next = Math.round(Math.min(AZIMUTH_RANGE[1], Math.max(AZIMUTH_RANGE[0], a)));
+  if (next !== app.azimuth) beginEdit('环绕方位', 'camera');
+  app.azimuth = next;
+  if (el.azimuth) el.azimuth.value = String(app.azimuth);
+  if (el.azimuthVal) el.azimuthVal.textContent = `${app.azimuth}°`;
+  return app.azimuth;
+}
+
+function setElevation(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return app.elevation;
+  const next = Math.round(Math.min(ELEVATION_RANGE[1], Math.max(ELEVATION_RANGE[0], n)));
+  if (next !== app.elevation) beginEdit('俯仰偏移', 'camera');
+  app.elevation = next;
+  if (el.elevation) el.elevation.value = String(app.elevation);
+  if (el.elevationVal) el.elevationVal.textContent = `${app.elevation}°`;
+  return app.elevation;
+}
+
+/** 画布坐标 → NDC。 */
+function canvasNdc(canvas, clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: ((clientX - r.left) / Math.max(1, r.width)) * 2 - 1,
+    y: 1 - ((clientY - r.top) / Math.max(1, r.height)) * 2,
+    inside: clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom,
+  };
+}
+
+function ndcHitTri(px, py, ax, ay, bx, by, cx, cy) {
+  const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+  const d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+  const d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(hasNeg && hasPos);
+}
+
+/**
+ * 屏幕点是否落在模型上（CPU 蒙皮 + 逐三角形 NDC 命中测试）。
+ * 用当前姿势的顶点位置，与渲染完全同源；返回 { hit, part, triangle } 供日志/API 用。
+ */
+function pickModelAt(clientX, clientY, opts = {}) {
+  if (!app.asset || !renderer || !renderer.lastProjView) return { hit: false, reason: 'no-model' };
+  const canvas = el.canvas;
+  const ndc = canvasNdc(canvas, clientX, clientY);
+  if (!ndc.inside && !opts.allowOutside) return { hit: false, reason: 'outside' };
+  const mvp = mat4Multiply(mat4Identity(), renderer.lastProjView, renderer.lastWorld);
+  const asset = app.asset;
+  const anim = animationOf(app.state);
+  if (anim) samplePose(asset, anim, app.times[app.state] || 0, { clampEnd: app.clampTrackEnd });
+  let best = null;
+  for (let pi = 0; pi < asset.parts.length; pi++) {
+    const part = asset.parts[pi];
+    const pos = computePartPositions(part);
+    if (!pos || !pos.length) continue;
+    // 先算 NDC 包围盒，点在盒外直接跳过（避免全量三角形测试）。
+    const n = pos.length / 3;
+    const scr = new Float32Array(n * 2);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const ox = pos[i * 3], oy = pos[i * 3 + 1], oz = pos[i * 3 + 2];
+      const cx = mvp[0] * ox + mvp[4] * oy + mvp[8] * oz + mvp[12];
+      const cy = mvp[1] * ox + mvp[5] * oy + mvp[9] * oz + mvp[13];
+      const cw = mvp[3] * ox + mvp[7] * oy + mvp[11] * oz + mvp[15];
+      const w = Math.abs(cw) > 1e-9 ? cw : 1e-9;
+      const nx = cx / w, ny = cy / w;
+      scr[i * 2] = nx; scr[i * 2 + 1] = ny;
+      if (nx < x0) x0 = nx;
+      if (nx > x1) x1 = nx;
+      if (ny < y0) y0 = ny;
+      if (ny > y1) y1 = ny;
+    }
+    if (ndc.x < x0 || ndc.x > x1 || ndc.y < y0 || ndc.y > y1) continue;
+    if (part.prim.type !== 'TRIANGLES') continue;
+    const idx = part.prim.indices;
+    for (let t = 0; t + 2 < idx.length; t += 3) {
+      const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+      if (ndcHitTri(ndc.x, ndc.y, scr[a * 2], scr[a * 2 + 1], scr[b * 2], scr[b * 2 + 1], scr[c * 2], scr[c * 2 + 1])) {
+        best = { hit: true, part, partIndex: pi, triangle: t / 3, screen: ndc };
+        break;
+      }
+    }
+    if (best) break;
+  }
+  return best || { hit: false, reason: 'empty', screen: ndc };
+}
+
+/** 选中态：画布轮廓高亮 + 光标提示（拖动可移动模型）。 */
+function setSelected(on, opts = {}) {
+  const next = !!on && !!app.asset;
+  if (app.selected === next) {
+    if (el.canvas) el.canvas.classList.toggle('is-selected', next);
+    return app.selected;
+  }
+  app.selected = next;
+  if (el.canvas) el.canvas.classList.toggle('is-selected', next);
+  if (opts.silent !== true) {
+    log(next ? 'ok' : 'info', next
+      ? '选中模型（轮廓高亮；按住左键拖动 = 移动模型摆放）'
+      : '取消选中');
+  }
+  return app.selected;
+}
+
+/** 屏幕像素位移 → 世界位移（相机平面内，1:1 跟手）。 */
+function screenDeltaToWorld(dx, dy) {
+  const cam = renderer && renderer.lastCamera;
+  const canvas = el.canvas;
+  if (!cam || !canvas) return null;
+  const h = Math.max(1, canvas.clientHeight || canvas.height);
+  const wpp = (app.worldH * app.zoom) / h; // 世界单位 / CSS 像素
+  const fx = cam.target[0] - cam.eye[0];
+  const fy = cam.target[1] - cam.eye[1];
+  const fz = cam.target[2] - cam.eye[2];
+  const fl = Math.hypot(fx, fy, fz) || 1;
+  const f = [fx / fl, fy / fl, fz / fl];
+  // right = normalize(cross(+Y, f))，up = cross(right, f)
+  let rx = -f[2], rz = f[0];
+  const rl = Math.hypot(rx, rz) || 1;
+  rx /= rl; rz /= rl;
+  const ux = -rz * f[1];
+  const uy = rz * f[0] - rx * f[2];
+  const uz = rx * f[1];
+  // 屏幕 +x 向右 / +y 向下：world = right*dx - up*dy
+  return [
+    (rx * dx - ux * dy) * wpp,
+    (-uy * dy) * wpp,
+    (rz * dx - uz * dy) * wpp,
+  ];
+}
+
+/** 拖动模型：把世界位移加到 placement.position（模型跟随光标，相机不动）。 */
+function nudgeModelByWorld(delta) {
+  if (!app.asset || !delta) return false;
+  const cur = clonePlacement(app.placement);
+  setModelPlacement({
+    ...cur,
+    position: cur.position.map((v, i) => v + delta[i]),
+    matrix: null,
+  });
+  return true;
+}
+
+function bindViewInteraction() {
+  const canvas = el.canvas;
+  if (!canvas) return;
+  // moved：拖动死区，避免「点一下选中」时抖出 1~2px 的位移。
+  const state = { mode: null, id: null, lastX: 0, lastY: 0, x0: 0, y0: 0, moved: false, grouped: false };
+
+  const begin = (mode, ev) => {
+    state.mode = mode;
+    state.moved = false;
+    state.grouped = false;
+    state.x0 = ev.clientX;
+    state.y0 = ev.clientY;
+    canvas.classList.add('is-dragging');
+    try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* 忽略 */ }
+  };
+
+  const onDown = (ev) => {
+    if (!app.asset) return;
+    state.id = ev.pointerId;
+    state.lastX = ev.clientX;
+    state.lastY = ev.clientY;
+    if (ev.button === 1) {
+      // 中键：环绕方位 + 俯角
+      ev.preventDefault();
+      begin('orbit', ev);
+      return;
+    }
+    if (ev.button !== 0) return;
+    const pick = pickModelAt(ev.clientX, ev.clientY);
+    if (!pick.hit) {
+      if (app.selected) setSelected(false);
+      return;
+    }
+    // 命中模型：点击 = 选中（轮廓高亮）；按住拖动 = 移动模型摆放。
+    if (!app.selected) setSelected(true);
+    ev.preventDefault();
+    begin('move', ev);
+  };
+
+  const onMove = (ev) => {
+    if (!state.mode) return;
+    const dx = ev.clientX - state.lastX;
+    const dy = ev.clientY - state.lastY;
+    state.lastX = ev.clientX;
+    state.lastY = ev.clientY;
+    if (!state.moved) {
+      if (Math.abs(ev.clientX - state.x0) < 3 && Math.abs(ev.clientY - state.y0) < 3) return;
+      state.moved = true;
+      // 整段拖动只记一条撤销（点一下不记）。
+      beginGroupEdit(state.mode === 'orbit' ? '环绕 / 俯角' : '拖动摆放');
+      state.grouped = true;
+    }
+    if (!dx && !dy) return;
+    ev.preventDefault();
+    if (state.mode === 'orbit') {
+      setAzimuth(app.azimuth - dx * ORBIT_DEG_PER_PX);
+      setElevation(app.elevation - dy * ORBIT_DEG_PER_PX);
+    } else {
+      nudgeModelByWorld(screenDeltaToWorld(dx, dy));
+      updateTransformPanel();
+    }
+  };
+
+  const endDrag = (ev) => {
+    if (!state.mode) return;
+    const mode = state.mode;
+    const moved = state.moved;
+    const grouped = state.grouped;
+    state.mode = null;
+    state.moved = false;
+    state.grouped = false;
+    canvas.classList.remove('is-dragging');
+    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* 忽略 */ }
+    if (grouped) endGroupEdit();
+    if (mode === 'orbit' && moved) {
+      log('info', `视角：方位 ${app.azimuth}° · 俯角 ${app.elevation}°`);
+    }
+    if (mode === 'move' && moved) {
+      const p = app.placement.position;
+      log('info', `拖动摆放 → position [${p.map((v) => v.toFixed(3)).join(', ')}]（改的是模型本身）`);
+      updateTransformPanel({ blur: true });
+    }
+  };
+
+  const onWheel = (ev) => {
+    if (!app.asset) return;
+    ev.preventDefault();
+    const step = ev.deltaY > 0 ? -0.08 : 0.08;
+    setZoom(app.zoom + step * Math.max(0.5, app.zoom));
+  };
+
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointermove', onMove);
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
+  // 中键在部分浏览器会触发自动滚动/粘贴，直接挡掉。
+  canvas.addEventListener('auxclick', (ev) => { if (ev.button === 1) ev.preventDefault(); });
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 }
 
 // ---------------------------------------------------------------- controls
@@ -3317,32 +4034,24 @@ function bindControls() {
   el.clamp.addEventListener('change', () => { app.clampTrackEnd = el.clamp.checked; });
 
   el.facing.addEventListener('input', () => {
-    app.facing = Number(el.facing.value);
+    const v = Number(el.facing.value);
+    if (v !== app.facing) beginEdit('模型朝向', 'facing');
+    app.facing = v;
     el.facingVal.textContent = `${app.facing}°`;
   });
   el.facingReset.addEventListener('click', () => {
+    if (app.facing !== 0) beginEdit('模型朝向');
     app.facing = 0;
     el.facing.value = '0';
     el.facingVal.textContent = '0°';
   });
-  el.zoom.addEventListener('input', () => {
-    app.zoom = Number(el.zoom.value);
-    el.zoomVal.textContent = app.zoom.toFixed(2) + '×';
-  });
-  el.azimuth.addEventListener('input', () => {
-    app.azimuth = Number(el.azimuth.value);
-    el.azimuthVal.textContent = `${app.azimuth}°`;
-  });
-  el.elevation.addEventListener('input', () => {
-    app.elevation = Number(el.elevation.value);
-    el.elevationVal.textContent = `${app.elevation}°`;
-  });
+  el.zoom.addEventListener('input', () => setZoom(Number(el.zoom.value)));
+  el.azimuth.addEventListener('input', () => setAzimuth(Number(el.azimuth.value)));
+  el.elevation.addEventListener('input', () => setElevation(Number(el.elevation.value)));
   el.cameraReset.addEventListener('click', () => {
-    app.zoom = 1; app.azimuth = 0; app.elevation = 0;
-    el.zoom.value = '1'; el.azimuth.value = '0'; el.elevation.value = '0';
-    el.zoomVal.textContent = '1.00×';
-    el.azimuthVal.textContent = '0°';
-    el.elevationVal.textContent = '0°';
+    setZoom(1);
+    setAzimuth(0);
+    setElevation(0);
   });
   el.fitpct.addEventListener('input', () => {
     app.fitPct = Number(el.fitpct.value);
@@ -3354,6 +4063,38 @@ function bindControls() {
     app.worldH = Number.isFinite(v) ? Math.max(0.5, Math.min(50, v)) : G3D_DEFAULTS.worldH;
     el.worldh.value = String(app.worldH);
   });
+
+  // 摆放 / 缩放（改模型本身，不是镜头）
+  el.transformRef.addEventListener('change', () => setTransformRef(el.transformRef.value));
+  for (const node of [el.transformCx, el.transformCy, el.transformCz]) {
+    node.addEventListener('change', applyTransformRef);
+    node.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); node.blur(); applyTransformRef(); }
+    });
+  }
+  for (const node of [el.transformRefX, el.transformRefY, el.transformRefZ]) {
+    node.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); node.blur(); applyCustomRefPoint(); }
+    });
+  }
+  el.transformRefApply.addEventListener('click', applyCustomRefPoint);
+  if (el.refMarker) {
+    el.refMarker.checked = !!app.refMarker;
+    el.refMarker.addEventListener('change', () => {
+      app.refMarker = el.refMarker.checked;
+      log('info', `参考点高亮${app.refMarker ? '开' : '关'}`);
+    });
+  }
+  el.transformScale.addEventListener('change', applyTransformScale);
+  el.transformScale.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); el.transformScale.blur(); applyTransformScale(); }
+  });
+  el.transformReset.addEventListener('click', () => {
+    resetModelPlacement();
+    log('info', '摆放 / 缩放已复位（模型回到 G3DArmy 默认：脚底在原点、等比适配；参考点 = 包围盒中心）');
+  });
+  if (el.undoBtn) el.undoBtn.addEventListener('click', () => undoEdit());
+  if (el.redoBtn) el.redoBtn.addEventListener('click', () => redoEdit());
 
   el.tintMode.addEventListener('change', () => {
     app.tintMode = el.tintMode.value;
@@ -3493,6 +4234,14 @@ function bindControls() {
   window.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      if (e.shiftKey) redoEdit();
+      else undoEdit();
+      return;
+    }
+    if (mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redoEdit(); return; }
     if (e.code === 'Space') { e.preventDefault(); app.playing = !app.playing; updatePlayButton(); }
     else if (e.key === 'ArrowLeft' || e.key === ',') { e.preventDefault(); stepFrame(-1); }
     else if (e.key === 'ArrowRight' || e.key === '.') { e.preventDefault(); stepFrame(1); }
@@ -3590,6 +4339,8 @@ async function boot() {
 
   initLayoutDrawers();
   bindControls();
+  bindViewInteraction();
+  updateHistoryUI();
   syncFrameRateUI();
   el.tintColor.disabled = true;
   try {
@@ -3635,7 +4386,74 @@ window.__g3dweb = {
   setRotation: (rotation) => setModelPlacement({ rotation }),
   setScale: (scale) => setModelPlacement({ scale }),
   getPlacement,
+  getModelMetrics,
+  // 设置参考点（面板下拉的 API 版）：'center' | 'feetCenter' | 'custom'
+  setModelReference: setTransformRef,
+  // 自定义参考点：直接给场景全局坐标（= 下拉里「自定义」那一行）
+  setCustomRefPoint: (point) => {
+    if (!Array.isArray(point) && !(point && typeof point === 'object')) {
+      throw new Error('setCustomRefPoint 需要 [x, y, z] 或 {x,y,z}');
+    }
+    if (transformRefKey() !== 'custom') setTransformRef('custom');
+    translateRefTo(cloneVec3(point, [0, 0, 0]));
+    updateTransformPanel({ blur: true });
+    return getModelMetrics();
+  },
+  // 自定义参考点的局部（模型空间）坐标：脱绑 bbox 时用它固定一个直观位置
+  setCustomRefLocal,
+  setModelCenter: (point, ref = null) => {
+    if (!renderer || !renderer.lastModel) return null;
+    if (!Array.isArray(point) && !(point && typeof point === 'object')) {
+      throw new Error('setModelCenter 需要 [x, y, z] 或 {x,y,z}');
+    }
+    const key = TRANSFORM_REFS[ref] ? ref : transformRefKey();
+    if (key !== transformRefKey()) setTransformRef(key);
+    translateRefTo(cloneVec3(point, [0, 0, 0]));
+    updateTransformPanel({ blur: true });
+    return getModelMetrics();
+  },
+  // 参考点的场景绝对坐标（同面板输入框）
+  getModelReference: () => {
+    const m = renderer && renderer.lastModel;
+    const p = transformRefPoint(m);
+    return p ? { ref: transformRefKey(), point: r3v(p) } : null;
+  },
+  // 参考点高亮小球开关（面板勾选框的 API 版）
+  setRefMarker: (enabled) => {
+    app.refMarker = enabled == null ? true : !!enabled;
+    if (el.refMarker) el.refMarker.checked = app.refMarker;
+    return app.refMarker;
+  },
   getModelMatrix: () => (renderer?.lastWorld ? Array.from(renderer.lastWorld) : null),
+
+  // 视图交互（画布鼠标捕获的 API 版）
+  setZoom,
+  setAzimuth,
+  setElevation,
+  // 撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z），作用域 = 摆放/缩放 + 参考点 + 视角
+  undo: undoEdit,
+  redo: redoEdit,
+  history: () => ({
+    undo: history.undo.map((e) => e.label),
+    redo: history.redo.map((e) => e.label),
+    canUndo: history.undo.length > 0,
+    canRedo: history.redo.length > 0,
+  }),
+  setCamera: (opts = {}) => {
+    if (opts.zoom != null) setZoom(opts.zoom);
+    if (opts.azimuth != null) setAzimuth(opts.azimuth);
+    if (opts.elevation != null) setElevation(opts.elevation);
+    return { zoom: app.zoom, azimuth: app.azimuth, elevation: app.elevation };
+  },
+  getCamera: () => ({ zoom: app.zoom, azimuth: app.azimuth, elevation: app.elevation, camera: renderer ? renderer.lastCamera : null }),
+  // 屏幕坐标（CSS 像素，相对画布左上角）命中测试
+  pickModel: (x, y) => {
+    const r = el.canvas.getBoundingClientRect();
+    const hit = pickModelAt(r.left + Number(x), r.top + Number(y));
+    return { hit: !!hit.hit, reason: hit.reason || null, part: hit.part ? hit.part.name || hit.part.id || null : null, triangle: hit.triangle ?? null };
+  },
+  selectModel3D: (enabled) => setSelected(enabled == null ? true : !!enabled),
+  isSelected: () => !!app.selected,
   moveModel,
   moveObject: moveModel,
   rotateModel,
